@@ -1,0 +1,40 @@
+{
+  "environment": {
+    "python": "3.9.2 (tags/v3.9.2:1a79785, Feb 19 2021, 13:44:55) [MSC v.1928 64 bit (AMD64)]",
+    "timer": "time.perf_counter_ns",
+    "seed": 20260723,
+    "molecules": 1000
+  },
+  "python": {
+    "tanimoto_batch": {
+      "mean_ms": 6.11,
+      "median_ms": 5.8035,
+      "minimum_ms": 5.6314,
+      "maximum_ms": 7.5668,
+      "repeats": 5
+    },
+    "tanimoto_per_molecule_ms": 0.00611,
+    "gnn_single_graph": {
+      "mean_ms": 13.470600000000001,
+      "median_ms": 13.989,
+      "minimum_ms": 12.1534,
+      "maximum_ms": 14.6502,
+      "repeats": 5
+    },
+    "admet_batch": {
+      "mean_ms": 31.90506,
+      "median_ms": 30.877,
+      "minimum_ms": 30.6939,
+      "maximum_ms": 35.9564,
+      "repeats": 5
+    },
+    "admet_per_molecule_ms": 0.03190506,
+    "end_to_end_per_molecule_ms": 13.50861506
+  },
+  "targets": {
+    "tanimoto": 50.0,
+    "gnn": 10.0,
+    "admet": 20.0,
+    "end_to_end": 30.0
+  }
+}

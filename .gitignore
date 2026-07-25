@@ -1,0 +1,32 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Simulation outputs
+sim/build/
+*.vcd
+*.vvp
+
+# Vivado generated files and build products
+*.jou
+*.log
+*.pb
+*.str
+*.wdb
+*.wdf
+*.dcp
+FPGA/FPGA.cache/
+FPGA/FPGA.hw/
+FPGA/FPGA.ip_user_files/
+FPGA/FPGA.runs/
+FPGA/FPGA.sim/
+
+# Keep only the reproducible IP configuration from generated IP source trees.
+FPGA/FPGA.srcs/sources_1/ip/*/*
+!FPGA/FPGA.srcs/sources_1/ip/*/*.xci
+
+# Local safety copies and editor/OS clutter
+backup_before_codex_*/
+~$*
+.DS_Store
+Thumbs.db
