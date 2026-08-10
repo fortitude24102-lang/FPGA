@@ -17,6 +17,24 @@ PROTOCOL_TEST = SIM / "test_dma_protocol_codegen.py"
 PROTOCOL_GENERATOR = ROOT / "tools" / "generate_dma_protocol.py"
 
 TESTS = {
+    "dma_frontend": (
+        "tb_dma_task_queue_frontend",
+        [RTL / "dma_task_queue_frontend.v", SIM / "tb_dma_task_queue_frontend.sv"],
+    ),
+    "dma_frontend_errors": (
+        "tb_dma_task_queue_frontend_errors",
+        [
+            RTL / "dma_task_queue_frontend.v",
+            SIM / "tb_dma_task_queue_frontend_errors.sv",
+        ],
+    ),
+    "dma_frontend_tasks": (
+        "tb_dma_task_queue_frontend_tasks",
+        [
+            RTL / "dma_task_queue_frontend.v",
+            SIM / "tb_dma_task_queue_frontend_tasks.sv",
+        ],
+    ),
     "tanimoto": (
         "tb_tanimoto",
         [RTL / "tanimoto_accelerator.v", SIM / "tb_tanimoto.sv"],
@@ -129,6 +147,8 @@ def main() -> int:
             iverilog,
             "-g2012",
             "-Wall",
+            "-I",
+            str(RTL),
             "-s",
             top,
             "-o",
