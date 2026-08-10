@@ -63,6 +63,10 @@ TESTS = {
         "tb_tanimoto",
         [RTL / "tanimoto_accelerator.v", SIM / "tb_tanimoto.sv"],
     ),
+    "tanimoto_latency": (
+        "tb_tanimoto_latency",
+        [RTL / "tanimoto_accelerator.v", SIM / "tb_tanimoto_latency.sv"],
+    ),
     "gnn": (
         "tb_gnn",
         [RTL / "gnn_message_passing.v", SIM / "tb_gnn.sv"],
@@ -81,6 +85,14 @@ TESTS = {
             RTL / "fc_network.v",
             RTL / "admet_predictor.v",
             SIM / "tb_admet.sv",
+        ],
+    ),
+    "admet_latency": (
+        "tb_admet_latency",
+        [
+            RTL / "fc_network.v",
+            RTL / "admet_predictor.v",
+            SIM / "tb_admet_latency.sv",
         ],
     ),
     "top": (
@@ -145,6 +157,22 @@ TESTS = {
             RTL / "dma_accelerator_backend.v",
             RTL / "generator_accelerator_top.v",
             SIM / "tb_top_dma_arbitration.sv",
+        ],
+    ),
+    "pipeline_latency": (
+        "tb_pipeline_latency",
+        [
+            RTL / "tanimoto_accelerator.v",
+            RTL / "gnn_message_passing.v",
+            RTL / "fc_network.v",
+            RTL / "admet_predictor.v",
+            RTL / "tanimoto_stream_batch.v",
+            RTL / "dma_task_queue_frontend.v",
+            RTL / "dma_task_queue.v",
+            RTL / "dma_result_formatter.v",
+            RTL / "dma_accelerator_backend.v",
+            RTL / "generator_accelerator_top.v",
+            SIM / "tb_pipeline_latency.sv",
         ],
     ),
 }

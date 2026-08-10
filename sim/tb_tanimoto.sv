@@ -144,7 +144,8 @@ module tb_tanimoto;
         random_b = random_fingerprint();
         expected_first = reference_tanimoto(random_a, random_b);
         launch(random_a, random_b);
-        repeat (4) @(posedge clk);
+        // Inject while the reciprocal pipeline is still busy.
+        repeat (2) @(posedge clk);
         @(negedge clk);
         query_fp = {1024{1'b1}};
         db_fp = {1024{1'b1}};

@@ -5,7 +5,8 @@ module tb_gnn_latency;
     localparam int FEATURE_DIM = 64;
     localparam int HIDDEN_DIM = 128;
     localparam int DATA_WIDTH = 16;
-    localparam int MAX_CYCLES_AT_100MHZ = 999_999;
+    // 13.4706 ms Python baseline / 10x target at 100 MHz.
+    localparam int MAX_CYCLES_AT_100MHZ = 134_705;
 
     logic clk = 1'b0;
     logic rst_n = 1'b0;
@@ -67,7 +68,7 @@ module tb_gnn_latency;
         end
         if (!valid)
             $fatal(1,
-                "Default GNN exceeded %0d cycles (10 ms at 100 MHz)",
+                "Default GNN exceeded %0d cycles (10x speedup target)",
                 MAX_CYCLES_AT_100MHZ);
 
         $display(

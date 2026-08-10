@@ -4,10 +4,11 @@
 //
 // similarity = popcount(query_fp & db_fp) / popcount(query_fp | db_fp)
 //
-// The result is unsigned Q16.16.  The design is vendor independent: a
-// balanced popcount tree is followed by a 27-cycle restoring divider.  A
-// start pulse is accepted only while busy is low.  query_fp and db_fp are
-// sampled by the combinational popcount tree on the accepting clock edge.
+// The result is unsigned Q16.16.  A 1025-entry reciprocal ROM replaces the
+// former 27-cycle restoring divider.  The ROM stores ceil(2^32 / union), then
+// an 11x32 multiply and a 16-bit shift produce the Q16.16 quotient.  The
+// reciprocal approximation differs from exact integer division by at most
+// one output LSB for the complete 0..1024 population-count domain.
 module tanimoto_accelerator (
     input  wire          clk,
     input  wire          rst_n,
@@ -19,11 +20,14 @@ module tanimoto_accelerator (
     output wire [31:0]   similarity
 );
 
-    localparam ST_IDLE = 2'd0;
-    localparam ST_DIV  = 2'd1;
-    localparam ST_DONE = 2'd2;
+    localparam [2:0] ST_IDLE   = 3'd0;
+    localparam [2:0] ST_SUM    = 3'd1;
+    localparam [2:0] ST_LOOKUP = 3'd2;
+    localparam [2:0] ST_MULT   = 3'd3;
+    localparam [2:0] ST_RESULT = 3'd4;
+    localparam [2:0] ST_DONE   = 3'd5;
 
-    reg [1:0] state;
+    reg [2:0] state;
 
     function [5:0] popcount32;
         input [31:0] value;
@@ -38,8 +42,10 @@ module tanimoto_accelerator (
     wire [1023:0] intersection_bits = query_fp & db_fp;
     wire [1023:0] union_bits        = query_fp | db_fp;
 
-    wire [5:0] intersection_count_32 [0:31];
-    wire [5:0] union_count_32        [0:31];
+    wire [5:0] intersection_count_32_comb [0:31];
+    wire [5:0] union_count_32_comb        [0:31];
+    reg  [5:0] intersection_count_32 [0:31];
+    reg  [5:0] union_count_32        [0:31];
     wire [6:0] intersection_count_64 [0:15];
     wire [6:0] union_count_64        [0:15];
     wire [7:0] intersection_count_128[0:7];
@@ -54,9 +60,9 @@ module tanimoto_accelerator (
     genvar group_idx;
     generate
         for (group_idx = 0; group_idx < 32; group_idx = group_idx + 1) begin : gen_count32
-            assign intersection_count_32[group_idx] =
+            assign intersection_count_32_comb[group_idx] =
                 popcount32(intersection_bits[group_idx*32 +: 32]);
-            assign union_count_32[group_idx] =
+            assign union_count_32_comb[group_idx] =
                 popcount32(union_bits[group_idx*32 +: 32]);
         end
         for (group_idx = 0; group_idx < 16; group_idx = group_idx + 1) begin : gen_count64
@@ -97,68 +103,87 @@ module tanimoto_accelerator (
         intersection_count_512[0] + intersection_count_512[1];
     assign union_count = union_count_512[0] + union_count_512[1];
 
-    // Restoring divider.  The numerator has 11 integer bits and 16
-    // fractional bits.  Its quotient is therefore the required Q16.16 value.
-    reg [26:0] numerator;
-    reg [10:0] denominator;
-    reg [11:0] remainder;
-    reg [26:0] quotient;
-    reg [4:0]  bit_index;
-    reg [31:0] result_reg;
+    integer count_group;
+    always @(posedge clk) begin
+        if (state == ST_IDLE && start) begin
+            for (count_group = 0; count_group < 32;
+                 count_group = count_group + 1) begin
+                intersection_count_32[count_group] <=
+                    intersection_count_32_comb[count_group];
+                union_count_32[count_group] <= union_count_32_comb[count_group];
+            end
+        end
+    end
 
-    wire [11:0] shifted_remainder =
-        {remainder[10:0], numerator[bit_index]};
-    wire subtract_denominator =
-        shifted_remainder >= {1'b0, denominator};
-    wire [11:0] next_remainder =
-        subtract_denominator
-            ? shifted_remainder - {1'b0, denominator}
-            : shifted_remainder;
-    wire [26:0] quotient_with_current_bit =
-        subtract_denominator
-            ? (quotient | (27'd1 << bit_index))
-            : quotient;
+    // Distributed ROM keeps lookup asynchronous and avoids consuming an
+    // extra block-RAM read cycle.  Entry 1 saturates because 2^32 does not fit
+    // in 32 bits; that case is exactly one Q16.16 LSB low and is permitted by
+    // the numerical acceptance tolerance.
+    (* rom_style = "distributed" *)
+    reg [31:0] reciprocal_rom [0:1024];
+    integer reciprocal_index;
+    initial begin
+        reciprocal_rom[0] = 32'd0;
+        reciprocal_rom[1] = 32'hffff_ffff;
+        for (reciprocal_index = 2; reciprocal_index <= 1024;
+             reciprocal_index = reciprocal_index + 1)
+            reciprocal_rom[reciprocal_index] =
+                (64'h1_0000_0000 + reciprocal_index - 1) /
+                reciprocal_index;
+    end
+
+    reg [10:0] intersection_count_reg;
+    reg [10:0] union_count_reg;
+    reg [31:0] reciprocal_reg;
+    reg [10:0] multiplier_intersection_reg;
+    reg [42:0] quotient_product_reg;
+    reg [31:0] result_reg;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state       <= ST_IDLE;
-            numerator   <= 27'd0;
-            denominator <= 11'd0;
-            remainder   <= 12'd0;
-            quotient    <= 27'd0;
-            bit_index   <= 5'd0;
-            result_reg  <= 32'd0;
+            state                       <= ST_IDLE;
+            intersection_count_reg      <= 11'd0;
+            union_count_reg             <= 11'd0;
+            reciprocal_reg              <= 32'd0;
+            multiplier_intersection_reg <= 11'd0;
+            quotient_product_reg        <= 43'd0;
+            result_reg                  <= 32'd0;
         end else begin
             case (state)
                 ST_IDLE: begin
-                    if (start) begin
-                        if (union_count == 0) begin
-                            result_reg <= 32'd0;
-                            state      <= ST_DONE;
-                        end else begin
-                            numerator   <= {intersection_count, 16'd0};
-                            denominator <= union_count;
-                            remainder   <= 12'd0;
-                            quotient    <= 27'd0;
-                            bit_index   <= 5'd26;
-                            state       <= ST_DIV;
-                        end
+                    if (start)
+                        state <= ST_SUM;
+                end
+
+                ST_SUM: begin
+                    intersection_count_reg <= intersection_count;
+                    union_count_reg        <= union_count;
+                    state                  <= ST_LOOKUP;
+                end
+
+                ST_LOOKUP: begin
+                    if (union_count_reg == 0) begin
+                        result_reg <= 32'd0;
+                        state      <= ST_DONE;
+                    end else begin
+                        reciprocal_reg <= reciprocal_rom[union_count_reg];
+                        multiplier_intersection_reg <= intersection_count_reg;
+                        state <= ST_MULT;
                     end
                 end
 
-                ST_DIV: begin
-                    remainder <= next_remainder;
-                    quotient  <= quotient_with_current_bit;
-                    if (bit_index == 0) begin
-                        result_reg <= {5'd0, quotient_with_current_bit};
-                        state      <= ST_DONE;
-                    end else begin
-                        bit_index <= bit_index - 1'b1;
-                    end
+                ST_MULT: begin
+                    quotient_product_reg <=
+                        multiplier_intersection_reg * reciprocal_reg;
+                    state <= ST_RESULT;
+                end
+
+                ST_RESULT: begin
+                    result_reg <= quotient_product_reg[42:16];
+                    state      <= ST_DONE;
                 end
 
                 ST_DONE: state <= ST_IDLE;
-
                 default: state <= ST_IDLE;
             endcase
         end

@@ -12,7 +12,8 @@ module fc_network #(
     parameter integer DATA_WIDTH     = 16,
     parameter integer FRAC_BITS      = 8,
     parameter integer ACC_WIDTH      = 48,
-    parameter integer OUTPUT_SIGMOID = 1
+    parameter integer OUTPUT_SIGMOID = 1,
+    parameter integer HIDDEN_LANES   = 4
 )(
     input  wire clk,
     input  wire rst_n,
@@ -41,18 +42,28 @@ module fc_network #(
     localparam integer OUTPUT_IDX_W =
         (OUTPUT_DIM <= 1) ? 1 : $clog2(OUTPUT_DIM);
 
-    localparam [2:0] ST_IDLE        = 3'd0;
-    localparam [2:0] ST_HIDDEN_INIT = 3'd1;
-    localparam [2:0] ST_HIDDEN_MAC  = 3'd2;
-    localparam [2:0] ST_OUTPUT_INIT = 3'd3;
-    localparam [2:0] ST_OUTPUT_MAC  = 3'd4;
-    localparam [2:0] ST_DONE        = 3'd5;
+    localparam [2:0] ST_IDLE         = 3'd0;
+    localparam [2:0] ST_HIDDEN_INIT  = 3'd1;
+    localparam [2:0] ST_HIDDEN_MAC   = 3'd2;
+    localparam [2:0] ST_HIDDEN_ACT   = 3'd3;
+    localparam [2:0] ST_OUTPUT_INIT  = 3'd4;
+    localparam [2:0] ST_OUTPUT_MAC   = 3'd5;
+    localparam [2:0] ST_OUTPUT_ACT   = 3'd6;
+    localparam [2:0] ST_DONE         = 3'd7;
 
     reg [2:0] state;
     reg [INPUT_IDX_W-1:0] input_idx;
     reg [HIDDEN_IDX_W-1:0] hidden_idx;
+    reg [HIDDEN_IDX_W-1:0] hidden_base;
     reg [OUTPUT_IDX_W-1:0] output_idx;
     reg signed [ACC_WIDTH-1:0] accumulator;
+    reg signed [ACC_WIDTH-1:0] hidden_accumulator
+        [0:HIDDEN_LANES-1];
+    reg hidden_mac_valid;
+    reg hidden_all_issued;
+    reg signed [DATA_WIDTH-1:0] hidden_input_reg;
+    reg signed [DATA_WIDTH-1:0] hidden_weight_reg
+        [0:HIDDEN_LANES-1];
 
     (* ram_style = "block" *)
     reg signed [DATA_WIDTH-1:0] hidden_weights
@@ -68,19 +79,13 @@ module fc_network #(
 
     wire signed [DATA_WIDTH-1:0] selected_input =
         inputs[input_idx*DATA_WIDTH +: DATA_WIDTH];
-    wire signed [DATA_WIDTH-1:0] selected_hidden_weight =
-        hidden_weights[input_idx*HIDDEN_DIM + hidden_idx];
     wire signed [DATA_WIDTH-1:0] selected_hidden_value =
         hidden_values[hidden_idx];
     wire signed [DATA_WIDTH-1:0] selected_output_weight =
         output_weights[hidden_idx*OUTPUT_DIM + output_idx];
 
-    wire signed [2*DATA_WIDTH-1:0] hidden_product =
-        selected_input * selected_hidden_weight;
     wire signed [2*DATA_WIDTH-1:0] output_product =
         selected_hidden_value * selected_output_weight;
-    wire signed [ACC_WIDTH-1:0] hidden_mac_next =
-        accumulator + hidden_product;
     wire signed [ACC_WIDTH-1:0] output_mac_next =
         accumulator + output_product;
 
@@ -170,48 +175,108 @@ module fc_network #(
         end
     end
 
+    integer lane_idx;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state       <= ST_IDLE;
             input_idx   <= {INPUT_IDX_W{1'b0}};
             hidden_idx  <= {HIDDEN_IDX_W{1'b0}};
+            hidden_base <= {HIDDEN_IDX_W{1'b0}};
             output_idx  <= {OUTPUT_IDX_W{1'b0}};
             accumulator <= {ACC_WIDTH{1'b0}};
+            hidden_mac_valid <= 1'b0;
+            hidden_all_issued <= 1'b0;
+            hidden_input_reg <= {DATA_WIDTH{1'b0}};
+            for (lane_idx = 0; lane_idx < HIDDEN_LANES;
+                 lane_idx = lane_idx + 1) begin
+                hidden_accumulator[lane_idx] <= {ACC_WIDTH{1'b0}};
+                hidden_weight_reg[lane_idx] <= {DATA_WIDTH{1'b0}};
+            end
         end else begin
             case (state)
                 ST_IDLE: begin
                     if (start) begin
-                        hidden_idx <= {HIDDEN_IDX_W{1'b0}};
-                        state      <= ST_HIDDEN_INIT;
+                        hidden_base <= {HIDDEN_IDX_W{1'b0}};
+                        state       <= ST_HIDDEN_INIT;
                     end
                 end
 
                 ST_HIDDEN_INIT: begin
-                    input_idx   <= {INPUT_IDX_W{1'b0}};
-                    accumulator <=
-                        $signed({
-                            {(ACC_WIDTH-DATA_WIDTH){
-                                hidden_biases[hidden_idx][DATA_WIDTH-1]
-                            }},
-                            hidden_biases[hidden_idx]
-                        }) <<< FRAC_BITS;
+                    input_idx <= {INPUT_IDX_W{1'b0}};
+                    hidden_mac_valid <= 1'b0;
+                    hidden_all_issued <= 1'b0;
+                    for (lane_idx = 0; lane_idx < HIDDEN_LANES;
+                         lane_idx = lane_idx + 1) begin
+                        if (hidden_base + lane_idx < HIDDEN_DIM)
+                            hidden_accumulator[lane_idx] <=
+                                $signed({
+                                    {(ACC_WIDTH-DATA_WIDTH){
+                                        hidden_biases[hidden_base + lane_idx]
+                                            [DATA_WIDTH-1]
+                                    }},
+                                    hidden_biases[hidden_base + lane_idx]
+                                }) <<< FRAC_BITS;
+                        else
+                            hidden_accumulator[lane_idx] <=
+                                {ACC_WIDTH{1'b0}};
+                    end
                     state <= ST_HIDDEN_MAC;
                 end
 
                 ST_HIDDEN_MAC: begin
-                    accumulator <= hidden_mac_next;
-                    if (input_idx == INPUT_DIM-1) begin
-                        hidden_values[hidden_idx] <=
-                            relu_quantize(hidden_mac_next);
-                        if (hidden_idx == HIDDEN_DIM-1) begin
-                            output_idx <= {OUTPUT_IDX_W{1'b0}};
-                            state      <= ST_OUTPUT_INIT;
-                        end else begin
-                            hidden_idx <= hidden_idx + 1'b1;
-                            state      <= ST_HIDDEN_INIT;
-                        end
+                    // Accumulate the previously registered weight/input pair.
+                    // This removes the LUTRAM-address -> RAM -> DSP ->
+                    // accumulator path that was the final 100 MHz violation.
+                    if (hidden_mac_valid)
+                        for (lane_idx = 0; lane_idx < HIDDEN_LANES;
+                             lane_idx = lane_idx + 1)
+                            if (hidden_base + lane_idx < HIDDEN_DIM)
+                                hidden_accumulator[lane_idx] <=
+                                    hidden_accumulator[lane_idx] +
+                                    $signed(hidden_input_reg) *
+                                    $signed(hidden_weight_reg[lane_idx]);
+
+                    if (!hidden_all_issued) begin
+                        hidden_input_reg <= selected_input;
+                        for (lane_idx = 0; lane_idx < HIDDEN_LANES;
+                             lane_idx = lane_idx + 1)
+                            if (hidden_base + lane_idx < HIDDEN_DIM)
+                                hidden_weight_reg[lane_idx] <=
+                                    hidden_weights[
+                                        input_idx*HIDDEN_DIM + hidden_base +
+                                        lane_idx
+                                    ];
+                            else
+                                hidden_weight_reg[lane_idx] <=
+                                    {DATA_WIDTH{1'b0}};
+                        hidden_mac_valid <= 1'b1;
+                        if (input_idx == INPUT_DIM-1)
+                            hidden_all_issued <= 1'b1;
+                        else
+                            input_idx <= input_idx + 1'b1;
+                    end else if (hidden_mac_valid) begin
+                        hidden_mac_valid <= 1'b0;
                     end else begin
-                        input_idx <= input_idx + 1'b1;
+                        state <= ST_HIDDEN_ACT;
+                    end
+                end
+
+                // Four hidden neurons are accumulated in parallel by default.
+                // Keeping activation in its own cycle preserves the 100 MHz
+                // timing boundary after the final MAC.
+                ST_HIDDEN_ACT: begin
+                    for (lane_idx = 0; lane_idx < HIDDEN_LANES;
+                         lane_idx = lane_idx + 1)
+                        if (hidden_base + lane_idx < HIDDEN_DIM)
+                            hidden_values[hidden_base + lane_idx] <=
+                                relu_quantize(
+                                    hidden_accumulator[lane_idx]);
+                    if (hidden_base + HIDDEN_LANES >= HIDDEN_DIM) begin
+                        output_idx <= {OUTPUT_IDX_W{1'b0}};
+                        state      <= ST_OUTPUT_INIT;
+                    end else begin
+                        hidden_base <= hidden_base + HIDDEN_LANES;
+                        state       <= ST_HIDDEN_INIT;
                     end
                 end
 
@@ -230,16 +295,23 @@ module fc_network #(
                 ST_OUTPUT_MAC: begin
                     accumulator <= output_mac_next;
                     if (hidden_idx == HIDDEN_DIM-1) begin
-                        output_values[output_idx] <=
-                            output_activation(output_mac_next);
-                        if (output_idx == OUTPUT_DIM-1) begin
-                            state <= ST_DONE;
-                        end else begin
-                            output_idx <= output_idx + 1'b1;
-                            state      <= ST_OUTPUT_INIT;
-                        end
+                        state <= ST_OUTPUT_ACT;
                     end else begin
                         hidden_idx <= hidden_idx + 1'b1;
+                    end
+                end
+
+                // The piecewise sigmoid contains arithmetic and saturation
+                // logic.  Register the completed MAC before entering it so
+                // the implementation does not build two DSP48s in series.
+                ST_OUTPUT_ACT: begin
+                    output_values[output_idx] <=
+                        output_activation(accumulator);
+                    if (output_idx == OUTPUT_DIM-1) begin
+                        state <= ST_DONE;
+                    end else begin
+                        output_idx <= output_idx + 1'b1;
+                        state      <= ST_OUTPUT_INIT;
                     end
                 end
 
