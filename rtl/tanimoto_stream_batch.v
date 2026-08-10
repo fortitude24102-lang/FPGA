@@ -23,7 +23,7 @@ module tanimoto_stream_batch (
 
     output reg           core_start,
     output wire [1023:0] core_query_fp,
-    output reg  [1023:0] core_db_fp,
+    output wire [1023:0] core_db_fp,
     input  wire          core_busy,
     input  wire          core_valid,
     input  wire [31:0]   core_similarity
@@ -42,7 +42,8 @@ module tanimoto_stream_batch (
     reg [6:0] candidates_started;
     reg [6:0] results_captured;
 
-    reg [1023:0] query_buffer;
+    reg [31:0] query_words [0:31];
+    reg [31:0] db_words [0:31];
     reg result_buffer_valid;
     reg [31:0] result_buffer_data;
     reg result_buffer_last;
@@ -51,7 +52,13 @@ module tanimoto_stream_batch (
     wire loading_payload = (state == STATE_LOAD_QUERY) ||
                            (state == STATE_LOAD_CANDIDATE);
     assign payload_ready = loading_payload && !error;
-    assign core_query_fp = query_buffer;
+    genvar fp_word;
+    generate
+        for (fp_word = 0; fp_word < 32; fp_word = fp_word + 1) begin : gen_fp_words
+            assign core_query_fp[fp_word*32 +: 32] = query_words[fp_word];
+            assign core_db_fp[fp_word*32 +: 32] = db_words[fp_word];
+        end
+    endgenerate
     assign result_valid = result_buffer_valid;
     assign result_data = result_buffer_data;
     assign result_last = result_buffer_last;
@@ -68,8 +75,6 @@ module tanimoto_stream_batch (
             accepted_payload_words <= 32'd0;
             candidates_started <= 7'd0;
             results_captured <= 7'd0;
-            query_buffer <= 1024'd0;
-            core_db_fp <= 1024'd0;
             result_buffer_valid <= 1'b0;
             result_buffer_data <= 32'd0;
             result_buffer_last <= 1'b0;
@@ -101,8 +106,6 @@ module tanimoto_stream_batch (
                         accepted_payload_words <= 32'd0;
                         candidates_started <= 7'd0;
                         results_captured <= 7'd0;
-                        query_buffer <= 1024'd0;
-                        core_db_fp <= 1024'd0;
                         error <= 1'b0;
                         state <= STATE_LOAD_QUERY;
                     end
@@ -120,7 +123,7 @@ module tanimoto_stream_batch (
                     end else begin
                         accepted_payload_words <= accepted_payload_words + 32'd1;
                         if (state == STATE_LOAD_QUERY) begin
-                            query_buffer[fingerprint_word_index*32 +: 32] <= payload_data;
+                            query_words[fingerprint_word_index] <= payload_data;
                             if (fingerprint_word_index == 6'd31) begin
                                 fingerprint_word_index <= 6'd0;
                                 state <= STATE_LOAD_CANDIDATE;
@@ -128,7 +131,7 @@ module tanimoto_stream_batch (
                                 fingerprint_word_index <= fingerprint_word_index + 6'd1;
                             end
                         end else begin
-                            core_db_fp[fingerprint_word_index*32 +: 32] <= payload_data;
+                            db_words[fingerprint_word_index] <= payload_data;
                             if (fingerprint_word_index == 6'd31) begin
                                 fingerprint_word_index <= 6'd0;
                                 state <= STATE_WAIT_CORE;

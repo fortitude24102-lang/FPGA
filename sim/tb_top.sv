@@ -22,6 +22,16 @@ module tb_top;
     wire [1:0] rresp;
     wire rvalid;
     logic rready = 1'b0;
+    logic [127:0] s_axis_job_tdata = '0;
+    logic [15:0] s_axis_job_tkeep = '0;
+    logic s_axis_job_tvalid = 1'b0;
+    wire s_axis_job_tready;
+    logic s_axis_job_tlast = 1'b0;
+    wire [127:0] m_axis_result_tdata;
+    wire [15:0] m_axis_result_tkeep;
+    wire m_axis_result_tvalid;
+    logic m_axis_result_tready = 1'b1;
+    wire m_axis_result_tlast;
 
     always #5 clk = ~clk;
 
@@ -33,6 +43,8 @@ module tb_top;
     ) dut (
         .s_axi_aclk(clk),
         .s_axi_aresetn(rst_n),
+        .s_axi_awprot(3'b000),
+        .s_axi_arprot(3'b000),
         .s_axi_awaddr(awaddr),
         .s_axi_awvalid(awvalid),
         .s_axi_awready(awready),
@@ -49,7 +61,17 @@ module tb_top;
         .s_axi_rdata(rdata),
         .s_axi_rresp(rresp),
         .s_axi_rvalid(rvalid),
-        .s_axi_rready(rready)
+        .s_axi_rready(rready),
+        .s_axis_job_tdata(s_axis_job_tdata),
+        .s_axis_job_tkeep(s_axis_job_tkeep),
+        .s_axis_job_tvalid(s_axis_job_tvalid),
+        .s_axis_job_tready(s_axis_job_tready),
+        .s_axis_job_tlast(s_axis_job_tlast),
+        .m_axis_result_tdata(m_axis_result_tdata),
+        .m_axis_result_tkeep(m_axis_result_tkeep),
+        .m_axis_result_tvalid(m_axis_result_tvalid),
+        .m_axis_result_tready(m_axis_result_tready),
+        .m_axis_result_tlast(m_axis_result_tlast)
     );
 
     task automatic axi_write(input logic [ADDR_WIDTH-1:0] address,
