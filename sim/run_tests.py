@@ -17,6 +17,10 @@ PROTOCOL_TEST = SIM / "test_dma_protocol_codegen.py"
 PROTOCOL_GENERATOR = ROOT / "tools" / "generate_dma_protocol.py"
 
 TESTS = {
+    "dma_queue": (
+        "tb_dma_task_queue",
+        [RTL / "dma_task_queue.v", SIM / "tb_dma_task_queue.sv"],
+    ),
     "tanimoto_stream_batch": (
         "tb_tanimoto_stream_batch",
         [
