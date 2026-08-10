@@ -17,6 +17,14 @@ PROTOCOL_TEST = SIM / "test_dma_protocol_codegen.py"
 PROTOCOL_GENERATOR = ROOT / "tools" / "generate_dma_protocol.py"
 
 TESTS = {
+    "tanimoto_stream_batch": (
+        "tb_tanimoto_stream_batch",
+        [
+            RTL / "tanimoto_accelerator.v",
+            RTL / "tanimoto_stream_batch.v",
+            SIM / "tb_tanimoto_stream_batch.sv",
+        ],
+    ),
     "dma_formatter": (
         "tb_dma_result_formatter",
         [RTL / "dma_result_formatter.v", SIM / "tb_dma_result_formatter.sv"],
