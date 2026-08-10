@@ -13,6 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RTL = ROOT / "rtl"
 SIM = ROOT / "sim"
+PROTOCOL_TEST = SIM / "test_dma_protocol_codegen.py"
+PROTOCOL_GENERATOR = ROOT / "tools" / "generate_dma_protocol.py"
 
 TESTS = {
     "tanimoto": (
@@ -70,6 +72,25 @@ def run_command(command: list[str], log_path: Path) -> int:
     return completed.returncode
 
 
+def run_protocol_checks(build_dir: Path, include_unit_tests: bool) -> bool:
+    if include_unit_tests:
+        print("\n===== protocol: unit tests =====")
+        if run_command(
+            [sys.executable, str(PROTOCOL_TEST)],
+            build_dir / "protocol_unit.log",
+        ) != 0:
+            return False
+
+    print("\n===== protocol: generated-file check =====")
+    if run_command(
+        [sys.executable, str(PROTOCOL_GENERATOR), "--check"],
+        build_dir / "protocol_check.log",
+    ) != 0:
+        return False
+    print("Protocol generated-file check passed")
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -77,11 +98,15 @@ def main() -> int:
     )
     parser.add_argument(
         "--test",
-        choices=["all", *TESTS],
+        choices=["all", "protocol", *TESTS],
         default="all",
         help="run one regression or all",
     )
     args = parser.parse_args()
+
+    args.build_dir.mkdir(parents=True, exist_ok=True)
+    if args.test == "protocol":
+        return 0 if run_protocol_checks(args.build_dir, include_unit_tests=False) else 1
 
     iverilog = find_tool("iverilog", r"C:\iverilog\bin\iverilog.exe")
     vvp = find_tool("vvp", r"C:\iverilog\bin\vvp.exe")
@@ -89,9 +114,13 @@ def main() -> int:
         print("error: Icarus Verilog (iverilog and vvp) was not found", file=sys.stderr)
         return 2
 
-    args.build_dir.mkdir(parents=True, exist_ok=True)
     selected = TESTS if args.test == "all" else {args.test: TESTS[args.test]}
     failures: list[str] = []
+
+    if args.test == "all" and not run_protocol_checks(
+        args.build_dir, include_unit_tests=True
+    ):
+        failures.append("protocol")
 
     for name, (top, sources) in selected.items():
         print(f"\n===== {name}: compile =====")
@@ -122,7 +151,8 @@ def main() -> int:
     if failures:
         print("FAILED: " + ", ".join(failures))
         return 1
-    print(f"PASSED: {len(selected)} testbenches")
+    protocol_count = 1 if args.test == "all" else 0
+    print(f"PASSED: {len(selected)} RTL testbenches and {protocol_count} protocol check")
     return 0
 
 

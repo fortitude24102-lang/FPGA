@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "wire_endianness": "little",
+  "magic": {
+    "request": "0x4D4F4C51",
+    "response": "0x4D4F4C52",
+    "trailer": "0x4D4F4C45"
+  },
+  "version": 1,
+  "headers": {
+    "batch_words": 8,
+    "task_words": 8,
+    "result_words": 8,
+    "trailer_words": 8
+  },
+  "limits": {
+    "max_tasks": 64,
+    "max_transfer_bytes": 2097152,
+    "max_transfer_words": 524288,
+    "max_item_count": 64
+  },
+  "batch_flags": {
+    "continue_on_task_error": 1
+  },
+  "task_ids": {
+    "tanimoto": 0,
+    "gnn": 1,
+    "admet": 2,
+    "pipeline": 3
+  },
+  "task_flags": {
+    "full_gnn_output": 256,
+    "return_intermediate": 512,
+    "shared_query": 1024
+  },
+  "statuses": {
+    "ok": 0,
+    "bad_magic": 1,
+    "bad_version": 2,
+    "bad_length": 3,
+    "bad_task": 4,
+    "bad_flags": 5,
+    "bad_item_count": 6,
+    "result_overflow": 7,
+    "task_timeout": 8,
+    "legacy_busy": 9,
+    "stream_truncated": 10,
+    "internal_error": 11
+  },
+  "payload_words": {
+    "fingerprint": 32,
+    "tanimoto_pair": 64,
+    "gnn_adjacency": 79,
+    "gnn_features": 1600,
+    "gnn_total": 1679,
+    "admet_per_item": 20,
+    "pipeline_total": 1763,
+    "gnn_full_result": 3200,
+    "admet_results_per_item": 4
+  },
+  "field_offsets": {
+    "batch": {
+      "magic": 0,
+      "version_header_words": 1,
+      "batch_id": 2,
+      "task_count": 3,
+      "total_words": 4,
+      "batch_flags": 5,
+      "max_result_words": 6,
+      "reserved": 7
+    },
+    "task": {
+      "job_id": 0,
+      "task_and_flags": 1,
+      "payload_words": 2,
+      "result_capacity_words": 3,
+      "item_count": 4,
+      "user_tag": 5,
+      "timeout_cycles": 6,
+      "reserved": 7
+    },
+    "response": {
+      "magic": 0,
+      "version_header_words": 1,
+      "batch_id": 2,
+      "expected_task_count": 3,
+      "header_status": 4,
+      "output_capacity_words": 5,
+      "output_flags": 6,
+      "reserved": 7
+    },
+    "result": {
+      "job_id": 0,
+      "task_and_status": 1,
+      "result_words": 2,
+      "compute_cycles_lo": 3,
+      "compute_cycles_hi": 4,
+      "item_count": 5,
+      "user_tag": 6,
+      "detail": 7
+    },
+    "trailer": {
+      "magic": 0,
+      "batch_id": 1,
+      "completed_count": 2,
+      "error_count": 3,
+      "total_result_words": 4,
+      "batch_status": 5,
+      "first_error_job_id": 6,
+      "detail": 7
+    }
+  }
+}
