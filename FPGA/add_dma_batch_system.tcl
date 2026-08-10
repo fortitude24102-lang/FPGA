@@ -25,6 +25,7 @@ foreach old_cell {
     axi_debug_system_ila
     generator_accelerator_0
     ps_axi3_lite_bridge_dma
+    dma_ctrl_protocol_converter
     axi_dma_0
     dma_mem_smartconnect
     axis_job_fifo
@@ -59,8 +60,15 @@ set_property -dict [list \
     CONFIG.PCW_IRQ_F2P_INTR {1} \
 ] [get_bd_cells $ps]
 
-set dma_bridge [create_bd_cell -type module \
-    -reference ps_axi3_to_axil_bridge ps_axi3_lite_bridge_dma]
+set dma_bridge [create_bd_cell -type ip \
+    -vlnv xilinx.com:ip:axi_protocol_converter:2.1 \
+    dma_ctrl_protocol_converter]
+set_property -dict [list \
+    CONFIG.SI_PROTOCOL {AXI3} \
+    CONFIG.MI_PROTOCOL {AXI4LITE} \
+    CONFIG.ADDR_WIDTH {32} \
+    CONFIG.DATA_WIDTH {32} \
+] $dma_bridge
 
 set dma [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma:7.1 axi_dma_0]
 set_property -dict [list \
@@ -73,6 +81,8 @@ set_property -dict [list \
     CONFIG.c_m_axi_s2mm_data_width {128} \
     CONFIG.c_m_axis_mm2s_tdata_width {128} \
     CONFIG.c_s_axis_s2mm_tdata_width {128} \
+    CONFIG.c_mm2s_burst_size {16} \
+    CONFIG.c_s2mm_burst_size {16} \
     CONFIG.c_sg_length_width {23} \
 ] $dma
 
@@ -108,7 +118,8 @@ set irq_concat [create_bd_cell -type ip \
 set_property -dict [list CONFIG.NUM_PORTS {2}] $irq_concat
 
 # Preserve the original GP0 register path and add GP1 as a separate DMA
-# control path.  The custom bridges convert the PS AXI3 masters to AXI4-Lite.
+# control path.  A Xilinx protocol converter keeps the DMA visible to HSI so
+# Vitis can bind the axidma driver and generate its configuration table.
 connect_bd_intf_net [get_bd_intf_pins $legacy_bridge/M_AXI] \
     [get_bd_intf_pins $accel/s_axi]
 connect_bd_intf_net [get_bd_intf_pins $ps/M_AXI_GP1] \
@@ -192,9 +203,6 @@ assign_bd_address -offset 0x43C00000 -range 0x00040000 \
     [get_bd_addr_segs $accel/s_axi/reg0] -force
 assign_bd_address -offset 0x80400000 -range 0x00010000 \
     -target_address_space [get_bd_addr_spaces $ps/Data] \
-    [get_bd_addr_segs $dma_bridge/S_AXI/reg0] -force
-assign_bd_address -offset 0x80400000 -range 0x00010000 \
-    -target_address_space [get_bd_addr_spaces $dma_bridge/M_AXI] \
     [get_bd_addr_segs $dma/S_AXI_LITE/Reg] -force
 
 # Expose the PS DDR address window to both DMA data movers.

@@ -51,7 +51,7 @@ foreach name {
     processing_system7_0
     ps_axi3_lite_bridge_0
     generator_accelerator_0
-    ps_axi3_lite_bridge_dma
+    dma_ctrl_protocol_converter
     axi_dma_0
     dma_mem_smartconnect
     axis_job_fifo
@@ -88,8 +88,8 @@ if {[llength $ps] == 1} {
 
 check_intf_link processing_system7_0/M_AXI_GP0 ps_axi3_lite_bridge_0/S_AXI
 check_intf_link ps_axi3_lite_bridge_0/M_AXI generator_accelerator_0/s_axi
-check_intf_link processing_system7_0/M_AXI_GP1 ps_axi3_lite_bridge_dma/S_AXI
-check_intf_link ps_axi3_lite_bridge_dma/M_AXI axi_dma_0/S_AXI_LITE
+check_intf_link processing_system7_0/M_AXI_GP1 dma_ctrl_protocol_converter/S_AXI
+check_intf_link dma_ctrl_protocol_converter/M_AXI axi_dma_0/S_AXI_LITE
 check_intf_link axi_dma_0/M_AXIS_MM2S axis_job_fifo/S_AXIS
 check_intf_link axis_job_fifo/M_AXIS generator_accelerator_0/s_axis_job
 check_intf_link generator_accelerator_0/m_axis_result axis_result_fifo/S_AXIS
@@ -102,7 +102,7 @@ foreach pin {
     processing_system7_0/M_AXI_GP0_ACLK
     processing_system7_0/M_AXI_GP1_ACLK
     ps_axi3_lite_bridge_0/aclk
-    ps_axi3_lite_bridge_dma/aclk
+    dma_ctrl_protocol_converter/aclk
     axi_dma_0/s_axi_lite_aclk
     axis_job_fifo/m_axis_aclk
     axis_result_fifo/s_axis_aclk
@@ -127,7 +127,7 @@ check_pin_net axi_dma_0/mm2s_introut dma_irq_concat/In0
 check_pin_net axi_dma_0/s2mm_introut dma_irq_concat/In1
 check_pin_net rst_ps7_0_150M/ext_reset_in processing_system7_0/FCLK_RESET1_N
 foreach pin {
-    ps_axi3_lite_bridge_dma/aresetn
+    dma_ctrl_protocol_converter/aresetn
     generator_accelerator_0/s_axi_aresetn
     axi_dma_0/axi_resetn
     axis_result_fifo/s_axis_aresetn
@@ -151,6 +151,8 @@ if {[llength $dma] == 1} {
         CONFIG.c_m_axi_s2mm_data_width 128
         CONFIG.c_m_axis_mm2s_tdata_width 128
         CONFIG.c_s_axis_s2mm_tdata_width 128
+        CONFIG.c_mm2s_burst_size 16
+        CONFIG.c_s2mm_burst_size 16
         CONFIG.c_sg_length_width 23
     } {
         if {[get_property $property $dma] ne $expected} {
@@ -175,16 +177,12 @@ foreach fifo_name {axis_job_fifo axis_result_fifo} {
     }
 }
 
-foreach segment_name {
-    processing_system7_0/Data/SEG_ps_axi3_lite_bridge_dma_reg0
-    ps_axi3_lite_bridge_dma/M_AXI/SEG_axi_dma_0_Reg
-} {
-    set dma_segment [get_bd_addr_segs -quiet $segment_name]
-    if {[llength $dma_segment] != 1} {
-        lappend failures "missing AXI DMA register address segment $segment_name"
-    } elseif {[get_property OFFSET $dma_segment] ne "0x80400000"} {
-        lappend failures "$segment_name base is not 0x80400000"
-    }
+set dma_segment [get_bd_addr_segs -quiet \
+    processing_system7_0/Data/SEG_axi_dma_0_Reg]
+if {[llength $dma_segment] != 1} {
+    lappend failures "missing AXI DMA register address segment"
+} elseif {[get_property OFFSET $dma_segment] ne "0x80400000"} {
+    lappend failures "AXI DMA register base is not 0x80400000"
 }
 
 set legacy_segment [get_bd_addr_segs -quiet \
