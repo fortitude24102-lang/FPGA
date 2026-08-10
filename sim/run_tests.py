@@ -17,6 +17,18 @@ PROTOCOL_TEST = SIM / "test_dma_protocol_codegen.py"
 PROTOCOL_GENERATOR = ROOT / "tools" / "generate_dma_protocol.py"
 
 TESTS = {
+    "dma_formatter": (
+        "tb_dma_result_formatter",
+        [RTL / "dma_result_formatter.v", SIM / "tb_dma_result_formatter.sv"],
+    ),
+    "dma_formatter_errors": (
+        "tb_dma_result_formatter_errors",
+        [RTL / "dma_result_formatter.v", SIM / "tb_dma_result_formatter_errors.sv"],
+    ),
+    "dma_formatter_keep": (
+        "tb_dma_result_formatter_keep",
+        [RTL / "dma_result_formatter.v", SIM / "tb_dma_result_formatter_keep.sv"],
+    ),
     "dma_frontend": (
         "tb_dma_task_queue_frontend",
         [RTL / "dma_task_queue_frontend.v", SIM / "tb_dma_task_queue_frontend.sv"],
