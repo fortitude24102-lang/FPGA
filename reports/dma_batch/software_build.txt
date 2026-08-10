@@ -1,0 +1,21 @@
+Z15 DMA batch bare-metal build evidence
+Generated: 2026-08-10 Asia/Shanghai
+
+Platform: z15_dma_platform
+Application: accelerator_dma_batch
+Processor/OS: ps7_cortexa9_0 / standalone
+AXI DMA driver: axidma_v9_10
+AXI DMA base: 0x80400000
+MM2S data width / burst: 128 bit / 16 beats
+S2MM data width / burst: 128 bit / 16 beats
+
+Debug accelerator_dma_batch.elf
+   text    data       bss       dec      hex
+  59252    2656   4227872   4289780   4174f4
+
+Release accelerator_dma_batch.elf
+   text    data       bss       dec      hex
+  52516    2656   4227904   4283076   415ac4
+
+Both Debug and Release builds completed successfully.  The large BSS is the
+pair of statically allocated, cache-line-aligned 2 MiB DMA buffers.
