@@ -1,0 +1,631 @@
+#include "mol_dma_queue.h"
+
+#include <limits.h>
+
+static uint32_t get_u32(const uint8_t *buffer, uint32_t word_index)
+{
+    const uint8_t *p = buffer + ((size_t)word_index * 4U);
+    return ((uint32_t)p[0]) |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static void put_u32(uint8_t *buffer, uint32_t word_index, uint32_t value)
+{
+    uint8_t *p = buffer + ((size_t)word_index * 4U);
+    p[0] = (uint8_t)value;
+    p[1] = (uint8_t)(value >> 8);
+    p[2] = (uint8_t)(value >> 16);
+    p[3] = (uint8_t)(value >> 24);
+}
+
+static int is_aligned_64(const void *pointer)
+{
+    return (((uintptr_t)pointer & (uintptr_t)63U) == (uintptr_t)0U);
+}
+
+static int add_u32_checked(uint32_t a, uint32_t b, uint32_t *sum)
+{
+    if (sum == NULL || a > UINT32_MAX - b) {
+        return MOL_DMA_ERR_RANGE;
+    }
+    *sum = a + b;
+    return MOL_DMA_OK;
+}
+
+int mol_dma_required_words(uint32_t task_id, uint32_t flags,
+                           uint32_t item_count, uint32_t *payload_words,
+                           uint32_t *result_words)
+{
+    uint32_t payload = 0U;
+    uint32_t result = 0U;
+
+    if (payload_words == NULL || result_words == NULL || item_count == 0U ||
+        item_count > MOL_DMA_MAX_ITEM_COUNT) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+
+    switch (task_id) {
+    case MOL_DMA_TASK_TANIMOTO:
+        if ((flags & ~MOL_DMA_FLAG_SHARED_QUERY) != 0U) {
+            return MOL_DMA_ERR_ARGUMENT;
+        }
+        if ((flags & MOL_DMA_FLAG_SHARED_QUERY) != 0U) {
+            payload = MOL_DMA_PAYLOAD_WORDS_FINGERPRINT +
+                      item_count * MOL_DMA_PAYLOAD_WORDS_FINGERPRINT;
+            result = item_count;
+        } else {
+            if (item_count != 1U) {
+                return MOL_DMA_ERR_ARGUMENT;
+            }
+            payload = MOL_DMA_PAYLOAD_WORDS_TANIMOTO_PAIR;
+            result = 1U;
+        }
+        break;
+    case MOL_DMA_TASK_GNN:
+        if ((flags & ~MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0U || item_count != 1U) {
+            return MOL_DMA_ERR_ARGUMENT;
+        }
+        payload = MOL_DMA_PAYLOAD_WORDS_GNN_TOTAL;
+        result = ((flags & MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0U) ?
+                 MOL_DMA_PAYLOAD_WORDS_GNN_FULL_RESULT : 1U;
+        break;
+    case MOL_DMA_TASK_ADMET:
+        if (flags != 0U) {
+            return MOL_DMA_ERR_ARGUMENT;
+        }
+        payload = item_count * MOL_DMA_PAYLOAD_WORDS_ADMET_PER_ITEM;
+        result = item_count * MOL_DMA_PAYLOAD_WORDS_ADMET_RESULTS_PER_ITEM;
+        break;
+    case MOL_DMA_TASK_PIPELINE:
+        if ((flags & ~(MOL_DMA_FLAG_FULL_GNN_OUTPUT |
+                       MOL_DMA_FLAG_RETURN_INTERMEDIATE)) != 0U ||
+            item_count != 1U) {
+            return MOL_DMA_ERR_ARGUMENT;
+        }
+        payload = MOL_DMA_PAYLOAD_WORDS_PIPELINE_TOTAL;
+        if ((flags & MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0U) {
+            result = 3205U;
+        } else if ((flags & MOL_DMA_FLAG_RETURN_INTERMEDIATE) != 0U) {
+            result = 6U;
+        } else {
+            result = 4U;
+        }
+        break;
+    default:
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+
+    *payload_words = payload;
+    *result_words = result;
+    return MOL_DMA_OK;
+}
+
+int mol_dma_builder_init(mol_dma_builder_t *builder, void *buffer,
+                         size_t capacity_bytes, uint32_t batch_id,
+                         uint32_t batch_flags, uint32_t max_result_words)
+{
+    uint32_t index;
+
+    if (builder == NULL || buffer == NULL) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+    if (!is_aligned_64(buffer)) {
+        return MOL_DMA_ERR_ALIGNMENT;
+    }
+    if (capacity_bytes < (size_t)MOL_DMA_BATCH_HEADER_WORDS * 4U ||
+        capacity_bytes > (size_t)MOL_DMA_MAX_TRANSFER_BYTES ||
+        (capacity_bytes & 3U) != 0U ||
+        max_result_words < (MOL_DMA_BATCH_HEADER_WORDS +
+                            MOL_DMA_TRAILER_WORDS) ||
+        max_result_words > MOL_DMA_MAX_TRANSFER_WORDS) {
+        return MOL_DMA_ERR_RANGE;
+    }
+    if ((batch_flags & ~MOL_DMA_BATCH_FLAG_CONTINUE_ON_TASK_ERROR) != 0U) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+
+    builder->buffer = (uint8_t *)buffer;
+    builder->capacity_bytes = capacity_bytes;
+    builder->used_words = MOL_DMA_BATCH_HEADER_WORDS;
+    builder->task_count = 0U;
+    builder->batch_id = batch_id;
+    builder->batch_flags = batch_flags;
+    builder->max_result_words = max_result_words;
+    builder->reserved_result_words = MOL_DMA_BATCH_HEADER_WORDS +
+                                     MOL_DMA_TRAILER_WORDS;
+    builder->finalized = 0U;
+
+    for (index = 0U; index < MOL_DMA_BATCH_HEADER_WORDS; ++index) {
+        put_u32(builder->buffer, index, 0U);
+    }
+    put_u32(builder->buffer, MOL_DMA_BATCH_MAGIC_WORD,
+            MOL_DMA_MAGIC_REQUEST);
+    put_u32(builder->buffer, MOL_DMA_BATCH_VERSION_HEADER_WORDS_WORD,
+            (MOL_DMA_BATCH_HEADER_WORDS << 16) | MOL_DMA_VERSION);
+    put_u32(builder->buffer, MOL_DMA_BATCH_BATCH_ID_WORD, batch_id);
+    put_u32(builder->buffer, MOL_DMA_BATCH_BATCH_FLAGS_WORD, batch_flags);
+    put_u32(builder->buffer, MOL_DMA_BATCH_MAX_RESULT_WORDS_WORD,
+            max_result_words);
+    return MOL_DMA_OK;
+}
+
+int mol_dma_builder_add_task(mol_dma_builder_t *builder, uint32_t job_id,
+                             uint32_t task_id, uint32_t flags,
+                             uint32_t item_count, uint32_t user_tag,
+                             uint32_t timeout_cycles,
+                             const uint32_t *payload,
+                             uint32_t payload_words,
+                             uint32_t result_capacity_words)
+{
+    uint32_t required_payload;
+    uint32_t required_result;
+    uint32_t record_words;
+    uint32_t new_used_words;
+    uint32_t result_record_words;
+    uint32_t new_reserved_result_words;
+    uint32_t header_word;
+    uint32_t index;
+    int rc;
+
+    if (builder == NULL || builder->buffer == NULL || payload == NULL) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+    if (builder->finalized != 0U ||
+        builder->task_count >= MOL_DMA_MAX_TASKS) {
+        return MOL_DMA_ERR_STATE;
+    }
+
+    rc = mol_dma_required_words(task_id, flags, item_count,
+                                &required_payload, &required_result);
+    if (rc != MOL_DMA_OK || payload_words != required_payload ||
+        result_capacity_words < required_result) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+
+    rc = add_u32_checked(MOL_DMA_TASK_HEADER_WORDS, payload_words,
+                         &record_words);
+    if (rc != MOL_DMA_OK) {
+        return rc;
+    }
+    rc = add_u32_checked(builder->used_words, record_words, &new_used_words);
+    if (rc != MOL_DMA_OK || new_used_words > MOL_DMA_MAX_TRANSFER_WORDS ||
+        (size_t)new_used_words * 4U > builder->capacity_bytes) {
+        return MOL_DMA_ERR_RANGE;
+    }
+
+    rc = add_u32_checked(MOL_DMA_RESULT_HEADER_WORDS,
+                         result_capacity_words, &result_record_words);
+    if (rc != MOL_DMA_OK) {
+        return rc;
+    }
+    rc = add_u32_checked(builder->reserved_result_words,
+                         result_record_words,
+                         &new_reserved_result_words);
+    if (rc != MOL_DMA_OK ||
+        new_reserved_result_words > builder->max_result_words) {
+        return MOL_DMA_ERR_RANGE;
+    }
+
+    header_word = builder->used_words;
+    for (index = 0U; index < MOL_DMA_TASK_HEADER_WORDS; ++index) {
+        put_u32(builder->buffer, header_word + index, 0U);
+    }
+    put_u32(builder->buffer, header_word + MOL_DMA_TASK_JOB_ID_WORD, job_id);
+    put_u32(builder->buffer, header_word + MOL_DMA_TASK_TASK_AND_FLAGS_WORD,
+            task_id | flags);
+    put_u32(builder->buffer, header_word + MOL_DMA_TASK_PAYLOAD_WORDS_WORD,
+            payload_words);
+    put_u32(builder->buffer,
+            header_word + MOL_DMA_TASK_RESULT_CAPACITY_WORDS_WORD,
+            result_capacity_words);
+    put_u32(builder->buffer, header_word + MOL_DMA_TASK_ITEM_COUNT_WORD,
+            item_count);
+    put_u32(builder->buffer, header_word + MOL_DMA_TASK_USER_TAG_WORD,
+            user_tag);
+    put_u32(builder->buffer, header_word + MOL_DMA_TASK_TIMEOUT_CYCLES_WORD,
+            timeout_cycles);
+    for (index = 0U; index < payload_words; ++index) {
+        put_u32(builder->buffer,
+                header_word + MOL_DMA_TASK_HEADER_WORDS + index,
+                payload[index]);
+    }
+
+    builder->used_words = new_used_words;
+    builder->reserved_result_words = new_reserved_result_words;
+    builder->task_count += 1U;
+    return MOL_DMA_OK;
+}
+
+int mol_dma_builder_finalize(mol_dma_builder_t *builder,
+                             size_t *transfer_bytes)
+{
+    if (builder == NULL || transfer_bytes == NULL || builder->buffer == NULL) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+    if (builder->finalized != 0U || builder->task_count == 0U) {
+        return MOL_DMA_ERR_STATE;
+    }
+
+    put_u32(builder->buffer, MOL_DMA_BATCH_TASK_COUNT_WORD,
+            builder->task_count);
+    put_u32(builder->buffer, MOL_DMA_BATCH_TOTAL_WORDS_WORD,
+            builder->used_words);
+    builder->finalized = 1U;
+    *transfer_bytes = (size_t)builder->used_words * 4U;
+    return MOL_DMA_OK;
+}
+
+static int valid_success_result_size(uint32_t task_id, uint32_t item_count,
+                                     uint32_t result_words)
+{
+    if (item_count == 0U || item_count > MOL_DMA_MAX_ITEM_COUNT) {
+        return 0;
+    }
+    switch (task_id) {
+    case MOL_DMA_TASK_TANIMOTO:
+        return result_words == item_count;
+    case MOL_DMA_TASK_GNN:
+        return item_count == 1U &&
+               (result_words == 1U ||
+                result_words == MOL_DMA_PAYLOAD_WORDS_GNN_FULL_RESULT);
+    case MOL_DMA_TASK_ADMET:
+        return result_words ==
+               item_count * MOL_DMA_PAYLOAD_WORDS_ADMET_RESULTS_PER_ITEM;
+    case MOL_DMA_TASK_PIPELINE:
+        return item_count == 1U &&
+               (result_words == 4U || result_words == 6U ||
+                result_words == 3205U);
+    default:
+        return 0;
+    }
+}
+
+int mol_dma_results_open(mol_dma_result_iterator_t *iterator,
+                         const void *buffer, size_t response_bytes,
+                         uint32_t expected_batch_id)
+{
+    const uint8_t *bytes = (const uint8_t *)buffer;
+    uint32_t total_words;
+    uint32_t trailer_word;
+    uint32_t cursor;
+    uint32_t records = 0U;
+    uint32_t errors = 0U;
+    uint32_t first_error_job = UINT32_MAX;
+    uint32_t expected_tasks;
+
+    if (iterator == NULL || buffer == NULL) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+    if (!is_aligned_64(buffer)) {
+        return MOL_DMA_ERR_ALIGNMENT;
+    }
+    if (response_bytes < 4U * (MOL_DMA_BATCH_HEADER_WORDS +
+                              MOL_DMA_TRAILER_WORDS) ||
+        response_bytes > MOL_DMA_MAX_TRANSFER_BYTES ||
+        (response_bytes & 3U) != 0U) {
+        return MOL_DMA_ERR_FORMAT;
+    }
+    total_words = (uint32_t)(response_bytes / 4U);
+    trailer_word = total_words - MOL_DMA_TRAILER_WORDS;
+
+    if (get_u32(bytes, MOL_DMA_RESPONSE_MAGIC_WORD) !=
+            MOL_DMA_MAGIC_RESPONSE ||
+        get_u32(bytes, MOL_DMA_RESPONSE_VERSION_HEADER_WORDS_WORD) !=
+            ((MOL_DMA_BATCH_HEADER_WORDS << 16) | MOL_DMA_VERSION) ||
+        get_u32(bytes, MOL_DMA_RESPONSE_BATCH_ID_WORD) != expected_batch_id ||
+        get_u32(bytes, MOL_DMA_RESPONSE_HEADER_STATUS_WORD) >
+            MOL_DMA_STATUS_INTERNAL_ERROR ||
+        get_u32(bytes, MOL_DMA_RESPONSE_OUTPUT_CAPACITY_WORDS_WORD) <
+            total_words ||
+        get_u32(bytes, MOL_DMA_RESPONSE_OUTPUT_FLAGS_WORD) != 0U ||
+        get_u32(bytes, MOL_DMA_RESPONSE_RESERVED_WORD) != 0U) {
+        return MOL_DMA_ERR_FORMAT;
+    }
+
+    expected_tasks = get_u32(bytes, MOL_DMA_RESPONSE_EXPECTED_TASK_COUNT_WORD);
+    if (expected_tasks > MOL_DMA_MAX_TASKS ||
+        get_u32(bytes, trailer_word + MOL_DMA_TRAILER_MAGIC_WORD) !=
+            MOL_DMA_MAGIC_TRAILER ||
+        get_u32(bytes, trailer_word + MOL_DMA_TRAILER_BATCH_ID_WORD) !=
+            expected_batch_id ||
+        get_u32(bytes, trailer_word + MOL_DMA_TRAILER_TOTAL_RESULT_WORDS_WORD) !=
+            total_words ||
+        get_u32(bytes, trailer_word + MOL_DMA_TRAILER_BATCH_STATUS_WORD) >
+            MOL_DMA_STATUS_INTERNAL_ERROR) {
+        return MOL_DMA_ERR_FORMAT;
+    }
+
+    cursor = MOL_DMA_BATCH_HEADER_WORDS;
+    while (cursor < trailer_word) {
+        uint32_t task_status;
+        uint32_t task_id;
+        uint32_t status;
+        uint32_t result_words;
+        uint32_t item_count;
+        uint32_t record_end;
+        uint32_t job_id;
+
+        if (trailer_word - cursor < MOL_DMA_RESULT_HEADER_WORDS) {
+            return MOL_DMA_ERR_FORMAT;
+        }
+        task_status = get_u32(bytes,
+                              cursor + MOL_DMA_RESULT_TASK_AND_STATUS_WORD);
+        task_id = task_status & 0xFFU;
+        status = task_status >> 8;
+        result_words = get_u32(bytes,
+                               cursor + MOL_DMA_RESULT_RESULT_WORDS_WORD);
+        item_count = get_u32(bytes, cursor + MOL_DMA_RESULT_ITEM_COUNT_WORD);
+        job_id = get_u32(bytes, cursor + MOL_DMA_RESULT_JOB_ID_WORD);
+
+        if (status > MOL_DMA_STATUS_INTERNAL_ERROR ||
+            add_u32_checked(cursor + MOL_DMA_RESULT_HEADER_WORDS,
+                            result_words, &record_end) != MOL_DMA_OK ||
+            record_end > trailer_word ||
+            ((status == MOL_DMA_STATUS_OK) ?
+             (task_id > MOL_DMA_TASK_PIPELINE ||
+              !valid_success_result_size(task_id, item_count, result_words)) :
+             (result_words != 0U))) {
+            return MOL_DMA_ERR_FORMAT;
+        }
+        if (status != MOL_DMA_STATUS_OK) {
+            errors += 1U;
+            if (first_error_job == UINT32_MAX) {
+                first_error_job = job_id;
+            }
+        }
+        records += 1U;
+        if (records > expected_tasks || records > MOL_DMA_MAX_TASKS) {
+            return MOL_DMA_ERR_FORMAT;
+        }
+        cursor = record_end;
+    }
+
+    if (cursor != trailer_word ||
+        records != get_u32(bytes,
+                           trailer_word + MOL_DMA_TRAILER_COMPLETED_COUNT_WORD) ||
+        errors != get_u32(bytes,
+                          trailer_word + MOL_DMA_TRAILER_ERROR_COUNT_WORD) ||
+        records > expected_tasks ||
+        get_u32(bytes, trailer_word + MOL_DMA_TRAILER_FIRST_ERROR_JOB_ID_WORD) !=
+            first_error_job) {
+        return MOL_DMA_ERR_FORMAT;
+    }
+
+    iterator->buffer = bytes;
+    iterator->total_words = total_words;
+    iterator->cursor_words = MOL_DMA_BATCH_HEADER_WORDS;
+    iterator->trailer_word = trailer_word;
+    iterator->batch_id = expected_batch_id;
+    iterator->expected_task_count = expected_tasks;
+    iterator->completed_count = records;
+    iterator->records_seen = 0U;
+    return MOL_DMA_OK;
+}
+
+int mol_dma_results_next(mol_dma_result_iterator_t *iterator,
+                         mol_dma_result_view_t *view)
+{
+    uint32_t cursor;
+    uint32_t task_status;
+
+    if (iterator == NULL || view == NULL || iterator->buffer == NULL) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+    if (iterator->cursor_words == iterator->trailer_word) {
+        return 0;
+    }
+    if (iterator->records_seen >= iterator->completed_count ||
+        iterator->cursor_words > iterator->trailer_word -
+                                 MOL_DMA_RESULT_HEADER_WORDS) {
+        return MOL_DMA_ERR_FORMAT;
+    }
+
+    cursor = iterator->cursor_words;
+    task_status = get_u32(iterator->buffer,
+                          cursor + MOL_DMA_RESULT_TASK_AND_STATUS_WORD);
+    view->job_id = get_u32(iterator->buffer,
+                           cursor + MOL_DMA_RESULT_JOB_ID_WORD);
+    view->task_id = task_status & 0xFFU;
+    view->status = task_status >> 8;
+    view->result_words = get_u32(iterator->buffer,
+                                 cursor + MOL_DMA_RESULT_RESULT_WORDS_WORD);
+    view->compute_cycles =
+        (uint64_t)get_u32(iterator->buffer,
+                          cursor + MOL_DMA_RESULT_COMPUTE_CYCLES_LO_WORD) |
+        ((uint64_t)get_u32(iterator->buffer,
+                           cursor + MOL_DMA_RESULT_COMPUTE_CYCLES_HI_WORD)
+         << 32);
+    view->item_count = get_u32(iterator->buffer,
+                               cursor + MOL_DMA_RESULT_ITEM_COUNT_WORD);
+    view->user_tag = get_u32(iterator->buffer,
+                             cursor + MOL_DMA_RESULT_USER_TAG_WORD);
+    view->detail = get_u32(iterator->buffer,
+                           cursor + MOL_DMA_RESULT_DETAIL_WORD);
+    view->payload = iterator->buffer +
+                    (size_t)(cursor + MOL_DMA_RESULT_HEADER_WORDS) * 4U;
+
+    iterator->cursor_words += MOL_DMA_RESULT_HEADER_WORDS +
+                              view->result_words;
+    iterator->records_seen += 1U;
+    return 1;
+}
+
+int mol_dma_find_response_bytes(const void *buffer, size_t capacity_bytes,
+                                uint32_t expected_batch_id,
+                                size_t *response_bytes)
+{
+    const uint8_t *bytes = (const uint8_t *)buffer;
+    uint32_t capacity_words;
+    uint32_t trailer_word;
+
+    if (buffer == NULL || response_bytes == NULL) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+    if (!is_aligned_64(buffer)) {
+        return MOL_DMA_ERR_ALIGNMENT;
+    }
+    if (capacity_bytes < 4U * (MOL_DMA_BATCH_HEADER_WORDS +
+                              MOL_DMA_TRAILER_WORDS) ||
+        capacity_bytes > MOL_DMA_MAX_TRANSFER_BYTES ||
+        (capacity_bytes & 3U) != 0U) {
+        return MOL_DMA_ERR_RANGE;
+    }
+    capacity_words = (uint32_t)(capacity_bytes / 4U);
+
+    for (trailer_word = MOL_DMA_BATCH_HEADER_WORDS;
+         trailer_word <= capacity_words - MOL_DMA_TRAILER_WORDS;
+         ++trailer_word) {
+        mol_dma_result_iterator_t candidate;
+        uint32_t words;
+        if (get_u32(bytes, trailer_word) != MOL_DMA_MAGIC_TRAILER ||
+            get_u32(bytes, trailer_word + MOL_DMA_TRAILER_BATCH_ID_WORD) !=
+                expected_batch_id) {
+            continue;
+        }
+        words = get_u32(bytes,
+                        trailer_word + MOL_DMA_TRAILER_TOTAL_RESULT_WORDS_WORD);
+        if (words != trailer_word + MOL_DMA_TRAILER_WORDS) {
+            continue;
+        }
+        if (mol_dma_results_open(&candidate, buffer, (size_t)words * 4U,
+                                 expected_batch_id) == MOL_DMA_OK) {
+            *response_bytes = (size_t)words * 4U;
+            return MOL_DMA_OK;
+        }
+    }
+    return MOL_DMA_ERR_FORMAT;
+}
+
+#ifndef MOL_DMA_HOST_TEST
+#include "xaxidma_hw.h"
+#include "xil_cache.h"
+#include "xstatus.h"
+
+static uint32_t dma_channel_status(const mol_dma_device_t *device,
+                                   int direction)
+{
+    UINTPTR offset = (direction == XAXIDMA_DEVICE_TO_DMA) ?
+                     XAXIDMA_RX_OFFSET : XAXIDMA_TX_OFFSET;
+    return XAxiDma_ReadReg(device->instance.RegBase + offset,
+                           XAXIDMA_SR_OFFSET);
+}
+
+int mol_dma_device_reset(mol_dma_device_t *device,
+                         uint32_t reset_poll_limit)
+{
+    uint32_t poll;
+    if (device == NULL || reset_poll_limit == 0U) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+    XAxiDma_Reset(&device->instance);
+    for (poll = 0U; poll < reset_poll_limit; ++poll) {
+        if (XAxiDma_ResetIsDone(&device->instance)) {
+            device->last_mm2s_status = 0U;
+            device->last_s2mm_status = 0U;
+            return MOL_DMA_OK;
+        }
+    }
+    return MOL_DMA_ERR_TIMEOUT;
+}
+
+int mol_dma_device_init(mol_dma_device_t *device, uint16_t device_id,
+                        uint32_t reset_poll_limit)
+{
+    XAxiDma_Config *config;
+    int status;
+    if (device == NULL) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+    config = XAxiDma_LookupConfig((uint32_t)device_id);
+    if (config == NULL) {
+        return MOL_DMA_ERR_HARDWARE;
+    }
+    status = XAxiDma_CfgInitialize(&device->instance, config);
+    if (status != XST_SUCCESS) {
+        return MOL_DMA_ERR_HARDWARE;
+    }
+    if (XAxiDma_HasSg(&device->instance)) {
+        return MOL_DMA_ERR_UNSUPPORTED;
+    }
+    device->initialized = 1U;
+    return mol_dma_device_reset(device, reset_poll_limit);
+}
+
+int mol_dma_transfer_poll(mol_dma_device_t *device,
+                          const void *tx_buffer, size_t tx_bytes,
+                          void *rx_buffer, size_t rx_capacity_bytes,
+                          uint32_t expected_batch_id,
+                          uint32_t poll_limit, size_t *response_bytes)
+{
+    uint32_t poll;
+    int status;
+    int rc;
+
+    if (device == NULL || device->initialized == 0U ||
+        tx_buffer == NULL || rx_buffer == NULL || response_bytes == NULL ||
+        poll_limit == 0U) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+    if (!is_aligned_64(tx_buffer) || !is_aligned_64(rx_buffer)) {
+        return MOL_DMA_ERR_ALIGNMENT;
+    }
+    if (tx_bytes == 0U || tx_bytes > MOL_DMA_MAX_TRANSFER_BYTES ||
+        rx_capacity_bytes == 0U ||
+        rx_capacity_bytes > MOL_DMA_MAX_TRANSFER_BYTES ||
+        (tx_bytes & 3U) != 0U || (rx_capacity_bytes & 3U) != 0U) {
+        return MOL_DMA_ERR_RANGE;
+    }
+
+    Xil_DCacheFlushRange((UINTPTR)tx_buffer, (uint32_t)tx_bytes);
+    Xil_DCacheFlushRange((UINTPTR)rx_buffer, (uint32_t)rx_capacity_bytes);
+    Xil_DCacheInvalidateRange((UINTPTR)rx_buffer,
+                              (uint32_t)rx_capacity_bytes);
+
+    /* Arm S2MM first so no result beat can be lost when MM2S starts. */
+    status = XAxiDma_SimpleTransfer(&device->instance, (UINTPTR)rx_buffer,
+                                    (uint32_t)rx_capacity_bytes,
+                                    XAXIDMA_DEVICE_TO_DMA);
+    if (status != XST_SUCCESS) {
+        (void)mol_dma_device_reset(device, poll_limit);
+        return MOL_DMA_ERR_HARDWARE;
+    }
+    status = XAxiDma_SimpleTransfer(&device->instance, (UINTPTR)tx_buffer,
+                                    (uint32_t)tx_bytes,
+                                    XAXIDMA_DMA_TO_DEVICE);
+    if (status != XST_SUCCESS) {
+        (void)mol_dma_device_reset(device, poll_limit);
+        return MOL_DMA_ERR_HARDWARE;
+    }
+
+    for (poll = 0U; poll < poll_limit; ++poll) {
+        device->last_mm2s_status = dma_channel_status(
+            device, XAXIDMA_DMA_TO_DEVICE);
+        device->last_s2mm_status = dma_channel_status(
+            device, XAXIDMA_DEVICE_TO_DMA);
+        if (((device->last_mm2s_status | device->last_s2mm_status) &
+             XAXIDMA_ERR_ALL_MASK) != 0U) {
+            (void)mol_dma_device_reset(device, poll_limit);
+            return MOL_DMA_ERR_HARDWARE;
+        }
+        if (!XAxiDma_Busy(&device->instance, XAXIDMA_DMA_TO_DEVICE) &&
+            !XAxiDma_Busy(&device->instance, XAXIDMA_DEVICE_TO_DMA)) {
+            break;
+        }
+    }
+    if (poll == poll_limit) {
+        (void)mol_dma_device_reset(device, poll_limit);
+        return MOL_DMA_ERR_TIMEOUT;
+    }
+
+    Xil_DCacheInvalidateRange((UINTPTR)rx_buffer,
+                              (uint32_t)rx_capacity_bytes);
+    rc = mol_dma_find_response_bytes(rx_buffer, rx_capacity_bytes,
+                                     expected_batch_id, response_bytes);
+    if (rc != MOL_DMA_OK) {
+        (void)mol_dma_device_reset(device, poll_limit);
+    }
+    return rc;
+}
+#endif
