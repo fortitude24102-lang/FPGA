@@ -20,6 +20,21 @@ FPGA/FPGA.hw/
 FPGA/FPGA.ip_user_files/
 FPGA/FPGA.runs/
 FPGA/FPGA.sim/
+.Xil/
+FPGA/.Xil/
+vitis_workspace/
+
+# Generated Block Design output; keep the checked-in system.bd only.
+FPGA/FPGA.srcs/sources_1/bd/mref/
+FPGA/FPGA.srcs/sources_1/bd/system/hdl/
+FPGA/FPGA.srcs/sources_1/bd/system/hw_handoff/
+FPGA/FPGA.srcs/sources_1/bd/system/ip/
+FPGA/FPGA.srcs/sources_1/bd/system/ipshared/
+FPGA/FPGA.srcs/sources_1/bd/system/sim/
+FPGA/FPGA.srcs/sources_1/bd/system/synth/
+FPGA/FPGA.srcs/sources_1/bd/system/ui/
+FPGA/FPGA.srcs/sources_1/bd/system/*.bxml
+FPGA/FPGA.srcs/sources_1/bd/system/*_ooc.xdc
 
 # Keep only the reproducible IP configuration from generated IP source trees.
 FPGA/FPGA.srcs/sources_1/ip/*/*
@@ -27,6 +42,10 @@ FPGA/FPGA.srcs/sources_1/ip/*/*
 
 # Local safety copies and editor/OS clutter
 backup_before_codex_*/
+.codex_qa/
+.docx_review_*/
+_local/
+*.pid
 ~$*
 .DS_Store
 Thumbs.db
