@@ -1,0 +1,23 @@
+# Generated from the implemented Vivado design.
+route_complete=1
+unrouted_nets=0
+drc_errors=0
+methodology_errors=0
+dsp_used=78
+dsp_available=160
+lut_used=33959
+lut_available=46200
+ff_used=19620
+ff_available=92400
+bram_used=21.0
+bram_available=95
+clock_100_present=1
+clock_150_present=1
+clock_100_wns=0.166
+clock_100_whs=0.041
+clock_150_wns=0.488
+clock_150_whs=0.036
+global_wns=0.166
+global_whs=0.036
+bitstream_exists=1
+xsa_exists=1

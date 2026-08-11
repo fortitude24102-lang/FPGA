@@ -897,11 +897,11 @@
       },
       "generator_accelerator_0": {
         "vlnv": "xilinx.com:user:generator_accelerator_top:1.0",
-        "xci_name": "system_generator_accelerator_0_3"
+        "xci_name": "system_generator_accelerator_0_5"
       },
       "dma_ctrl_protocol_converter": {
         "vlnv": "xilinx.com:ip:axi_protocol_converter:2.1",
-        "xci_name": "system_dma_ctrl_protocol_converter_1",
+        "xci_name": "system_dma_ctrl_protocol_converter_3",
         "parameters": {
           "ADDR_WIDTH": {
             "value": "32"
@@ -919,7 +919,7 @@
       },
       "axi_dma_0": {
         "vlnv": "xilinx.com:ip:axi_dma:7.1",
-        "xci_name": "system_axi_dma_0_2",
+        "xci_name": "system_axi_dma_0_4",
         "parameters": {
           "c_include_mm2s": {
             "value": "1"
@@ -961,7 +961,7 @@
       },
       "axis_job_fifo": {
         "vlnv": "xilinx.com:ip:axis_data_fifo:2.0",
-        "xci_name": "system_axis_job_fifo_2",
+        "xci_name": "system_axis_job_fifo_4",
         "parameters": {
           "FIFO_DEPTH": {
             "value": "512"
@@ -982,7 +982,7 @@
       },
       "axis_result_fifo": {
         "vlnv": "xilinx.com:ip:axis_data_fifo:2.0",
-        "xci_name": "system_axis_result_fifo_2",
+        "xci_name": "system_axis_result_fifo_4",
         "parameters": {
           "FIFO_DEPTH": {
             "value": "512"
@@ -1003,7 +1003,7 @@
       },
       "dma_mem_smartconnect": {
         "vlnv": "xilinx.com:ip:smartconnect:1.0",
-        "xci_name": "system_dma_mem_smartconnect_2",
+        "xci_name": "system_dma_mem_smartconnect_4",
         "parameters": {
           "NUM_MI": {
             "value": "1"
@@ -1071,11 +1071,11 @@
       },
       "rst_ps7_0_150M": {
         "vlnv": "xilinx.com:ip:proc_sys_reset:5.0",
-        "xci_name": "system_rst_ps7_0_150M_2"
+        "xci_name": "system_rst_ps7_0_150M_4"
       },
       "dma_irq_concat": {
         "vlnv": "xilinx.com:ip:xlconcat:2.1",
-        "xci_name": "system_dma_irq_concat_2",
+        "xci_name": "system_dma_irq_concat_4",
         "parameters": {
           "NUM_PORTS": {
             "value": "2"
@@ -1090,16 +1090,10 @@
           "processing_system7_0/DDR"
         ]
       },
-      "processing_system7_0_M_AXI_GP1": {
+      "ps_axi3_lite_bridge_0_M_AXI": {
         "interface_ports": [
-          "processing_system7_0/M_AXI_GP1",
-          "dma_ctrl_protocol_converter/S_AXI"
-        ]
-      },
-      "dma_mem_smartconnect_M00_AXI": {
-        "interface_ports": [
-          "dma_mem_smartconnect/M00_AXI",
-          "processing_system7_0/S_AXI_HP0"
+          "ps_axi3_lite_bridge_0/M_AXI",
+          "generator_accelerator_0/s_axi"
         ]
       },
       "processing_system7_0_M_AXI_GP0": {
@@ -1108,16 +1102,52 @@
           "ps_axi3_lite_bridge_0/S_AXI"
         ]
       },
-      "ps_axi3_lite_bridge_0_M_AXI": {
+      "dma_mem_smartconnect_M00_AXI": {
         "interface_ports": [
-          "ps_axi3_lite_bridge_0/M_AXI",
-          "generator_accelerator_0/s_axi"
+          "dma_mem_smartconnect/M00_AXI",
+          "processing_system7_0/S_AXI_HP0"
+        ]
+      },
+      "processing_system7_0_M_AXI_GP1": {
+        "interface_ports": [
+          "processing_system7_0/M_AXI_GP1",
+          "dma_ctrl_protocol_converter/S_AXI"
         ]
       },
       "processing_system7_0_FIXED_IO": {
         "interface_ports": [
           "FIXED_IO",
           "processing_system7_0/FIXED_IO"
+        ]
+      },
+      "axi_dma_0_M_AXI_S2MM": {
+        "interface_ports": [
+          "axi_dma_0/M_AXI_S2MM",
+          "dma_mem_smartconnect/S01_AXI"
+        ]
+      },
+      "axi_dma_0_M_AXIS_MM2S": {
+        "interface_ports": [
+          "axi_dma_0/M_AXIS_MM2S",
+          "axis_job_fifo/S_AXIS"
+        ]
+      },
+      "axis_job_fifo_M_AXIS": {
+        "interface_ports": [
+          "axis_job_fifo/M_AXIS",
+          "generator_accelerator_0/s_axis_job"
+        ]
+      },
+      "axi_dma_0_M_AXI_MM2S": {
+        "interface_ports": [
+          "axi_dma_0/M_AXI_MM2S",
+          "dma_mem_smartconnect/S00_AXI"
+        ]
+      },
+      "axis_result_fifo_M_AXIS": {
+        "interface_ports": [
+          "axis_result_fifo/M_AXIS",
+          "axi_dma_0/S_AXIS_S2MM"
         ]
       },
       "generator_accelerator_0_m_axis_result": {
@@ -1130,36 +1160,6 @@
         "interface_ports": [
           "dma_ctrl_protocol_converter/M_AXI",
           "axi_dma_0/S_AXI_LITE"
-        ]
-      },
-      "axis_job_fifo_M_AXIS": {
-        "interface_ports": [
-          "axis_job_fifo/M_AXIS",
-          "generator_accelerator_0/s_axis_job"
-        ]
-      },
-      "axi_dma_0_M_AXIS_MM2S": {
-        "interface_ports": [
-          "axi_dma_0/M_AXIS_MM2S",
-          "axis_job_fifo/S_AXIS"
-        ]
-      },
-      "axi_dma_0_M_AXI_S2MM": {
-        "interface_ports": [
-          "axi_dma_0/M_AXI_S2MM",
-          "dma_mem_smartconnect/S01_AXI"
-        ]
-      },
-      "axis_result_fifo_M_AXIS": {
-        "interface_ports": [
-          "axis_result_fifo/M_AXIS",
-          "axi_dma_0/S_AXIS_S2MM"
-        ]
-      },
-      "axi_dma_0_M_AXI_MM2S": {
-        "interface_ports": [
-          "axi_dma_0/M_AXI_MM2S",
-          "dma_mem_smartconnect/S00_AXI"
         ]
       }
     },

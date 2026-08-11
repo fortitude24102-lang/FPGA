@@ -218,8 +218,20 @@ regenerate_bd_layout
 validate_bd_design
 save_bd_design
 
+# Vivado 2019.2 can retain stale source-direction metadata after cells are
+# deleted and recreated in one BD session.  Reopen the saved design before
+# target generation so proc_sys_reset outputs and DMA interrupts are not
+# incorrectly grounded in the generated wrapper.
+close_bd_design [get_bd_designs system]
+open_bd_design $bd_file
+validate_bd_design
+save_bd_design
 set bd_object [get_files -quiet $bd_file]
+reset_target all $bd_object
 generate_target all $bd_object
 puts "DMA_BATCH_BD_CREATED"
-close_project
-exit
+if {![info exists ::MOL_DMA_KEEP_PROJECT_OPEN] ||
+    !$::MOL_DMA_KEEP_PROJECT_OPEN} {
+    close_project
+    exit
+}
