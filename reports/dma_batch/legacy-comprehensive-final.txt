@@ -1,0 +1,18 @@
+
+Z15 molecular accelerator comprehensive self-test
+AXI base address: 0x43C00000
+UART0: PS MIO14/MIO15, 115200 8N1
+PASS: Tanimoto identical    result=0x00010000 load=14 us compute=0 us
+PASS: Tanimoto disjoint     result=0x00000000 load=13 us compute=0 us
+PASS: Tanimoto one-third    result=0x00005555 load=13 us compute=0 us
+INFO: configuring 8192 GNN Q8.8 weights...
+PASS: GNN 50x64x128 output[0]=1.0000, remaining words=0
+      weight_setup=3595 us input_load=397 us compute=250 us
+INFO: configuring four ADMET 20->10->1 models...
+PASS: ADMET four parallel outputs = 0.7305 (Q8.8 187)
+      weight_setup=401 us input_load=3 us compute=1 us
+PASS: Pipeline Tanimoto -> GNN -> ADMET compute=250 us
+PASS: software timeout path detected unfinished GNN
+PASS: busy command rejection set error status
+PASS: sticky status clear
+ALL COMPREHENSIVE SELF-TESTS PASSED

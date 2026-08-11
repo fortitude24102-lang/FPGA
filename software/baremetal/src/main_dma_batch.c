@@ -3,15 +3,27 @@
 #include "platform.h"
 
 #include "xil_printf.h"
+#include "xil_io.h"
+#include "xil_cache.h"
+#include "xil_mmu.h"
 #include "xparameters.h"
 #include "xtime_l.h"
 
 #define DMA_BUFFER_BYTES       MOL_DMA_MAX_TRANSFER_BYTES
-#define DMA_POLL_LIMIT         100000000U
+#define DMA_POLL_LIMIT           5000000U
 #define DMA_RESET_POLL_LIMIT   1000000U
 #define ACCEL_POLL_LIMIT       20000000U
 #define STRESS_BATCHES         1000U
 #define PAYLOAD_SCRATCH_WORDS  (32U + 64U * 32U)
+#define TANIMOTO_BATCH_GROUPS     8U
+#define TANIMOTO_TX_BUFFER_BYTES  (1024U * 1024U)
+#define DMA_TEST_MODE_OFFSET       0x0008U
+#define DMA_TEST_BEATS_OFFSET      0x000CU
+#define DMA_TEST_NORMAL            0U
+#define DMA_TEST_MM2S_SINK         2U
+#define DMA_TEST_S2MM_SOURCE       3U
+#define BANDWIDTH_TARGET_MBPS      500U
+#define TANIMOTO_CORE_LATENCY_CYCLES 5U
 
 /* Same-input Python reference timings from benchmark_results.json, rounded
  * to whole microseconds for the integer-only UART schema. */
@@ -31,6 +43,11 @@
 static u8 tx_buffer[DMA_BUFFER_BYTES] __attribute__((aligned(64)));
 static u8 rx_buffer[DMA_BUFFER_BYTES] __attribute__((aligned(64)));
 static u32 payload[PAYLOAD_SCRATCH_WORDS];
+/* One complete 1 MiB translation-table section is reserved so changing its
+ * MMU attribute cannot accidentally make adjacent application data
+ * non-cacheable.  Shared Tanimoto requests are at most about 67 KiB. */
+static u8 tanimoto_tx_buffer[TANIMOTO_TX_BUFFER_BYTES]
+    __attribute__((aligned(0x100000)));
 
 static mol_dma_device_t dma_device;
 static u32 next_batch_id = 1U;
@@ -56,6 +73,121 @@ static u32 elapsed_us(XTime start, XTime end)
     u64 ticks = (u64)(end - start);
     u32 us = (u32)((ticks * 1000000ULL) / (u64)COUNTS_PER_SECOND);
     return (us == 0U) ? 1U : us;
+}
+
+static u32 ticks_to_us(u64 ticks)
+{
+    return (u32)((ticks * 1000000ULL) / (u64)COUNTS_PER_SECOND);
+}
+
+static u32 dma_status(int direction)
+{
+    UINTPTR offset = (direction == XAXIDMA_DEVICE_TO_DMA) ?
+                     XAXIDMA_RX_OFFSET : XAXIDMA_TX_OFFSET;
+    return XAxiDma_ReadReg(dma_device.instance.RegBase + offset,
+                           XAXIDMA_SR_OFFSET);
+}
+
+static int wait_dma_idle(int direction, u32 *final_status)
+{
+    u32 poll;
+    u32 status = 0U;
+    for (poll = 0U; poll < DMA_POLL_LIMIT; ++poll) {
+        status = dma_status(direction);
+        if ((status & XAXIDMA_ERR_ALL_MASK) != 0U) {
+            *final_status = status;
+            return MOL_DMA_ERR_HARDWARE;
+        }
+        if ((status & XAXIDMA_IDLE_MASK) != 0U) {
+            *final_status = status;
+            return MOL_DMA_OK;
+        }
+    }
+    *final_status = status;
+    return MOL_DMA_ERR_TIMEOUT;
+}
+
+static void print_bandwidth(const char *direction, u32 bytes, u32 us)
+{
+    u32 mbps_x100 = (u32)(((u64)bytes * 100ULL) / (u64)us);
+    xil_printf("BANDWIDTH direction=%s bytes=%u us=%u MBps=%u.%02u\r\n",
+               direction, bytes, us, mbps_x100 / 100U, mbps_x100 % 100U);
+}
+
+static int run_standalone_bandwidth(void)
+{
+    const u32 bytes = DMA_BUFFER_BYTES;
+    const u32 beats = DMA_BUFFER_BYTES / 16U;
+    XTime start;
+    XTime end;
+    u32 mm2s_us;
+    u32 s2mm_us;
+    u32 status = 0U;
+    u32 mm2s_mbps;
+    u32 s2mm_mbps;
+    int rc;
+
+    /* Cache preparation is deliberately outside the DMA engine interval. */
+    Xil_DCacheFlushRange((UINTPTR)tx_buffer, bytes);
+    Xil_Out32((UINTPTR)ACCEL_BASEADDR + DMA_TEST_MODE_OFFSET,
+              DMA_TEST_MM2S_SINK);
+    XTime_GetTime(&start);
+    rc = XAxiDma_SimpleTransfer(&dma_device.instance, (UINTPTR)tx_buffer,
+                                bytes, XAXIDMA_DMA_TO_DEVICE);
+    if (rc == XST_SUCCESS)
+        rc = wait_dma_idle(XAXIDMA_DMA_TO_DEVICE, &status);
+    XTime_GetTime(&end);
+    Xil_Out32((UINTPTR)ACCEL_BASEADDR + DMA_TEST_MODE_OFFSET,
+              DMA_TEST_NORMAL);
+    if (rc != MOL_DMA_OK) {
+        xil_printf("FAIL: standalone MM2S rc=%d status=0x%08x\r\n",
+                   rc, status);
+        return 1;
+    }
+    mm2s_us = elapsed_us(start, end);
+
+    Xil_DCacheFlushRange((UINTPTR)rx_buffer, bytes);
+    Xil_Out32((UINTPTR)ACCEL_BASEADDR + DMA_TEST_BEATS_OFFSET, beats);
+    rc = XAxiDma_SimpleTransfer(&dma_device.instance, (UINTPTR)rx_buffer,
+                                bytes, XAXIDMA_DEVICE_TO_DMA);
+    if (rc != XST_SUCCESS) {
+        xil_printf("FAIL: standalone S2MM arm rc=%d\r\n", rc);
+        return 1;
+    }
+    XTime_GetTime(&start);
+    Xil_Out32((UINTPTR)ACCEL_BASEADDR + DMA_TEST_MODE_OFFSET,
+              DMA_TEST_S2MM_SOURCE);
+    rc = wait_dma_idle(XAXIDMA_DEVICE_TO_DMA, &status);
+    XTime_GetTime(&end);
+    Xil_Out32((UINTPTR)ACCEL_BASEADDR + DMA_TEST_MODE_OFFSET,
+              DMA_TEST_NORMAL);
+    if (rc != MOL_DMA_OK) {
+        xil_printf("FAIL: standalone S2MM rc=%d status=0x%08x\r\n",
+                   rc, status);
+        return 1;
+    }
+    s2mm_us = elapsed_us(start, end);
+    Xil_DCacheInvalidateRange((UINTPTR)rx_buffer, bytes);
+    if (load_le32(rx_buffer) != 0U ||
+        load_le32(rx_buffer + bytes - 16U) != beats - 1U) {
+        xil_printf("FAIL: standalone S2MM data first=0x%08x last=0x%08x\r\n",
+                   load_le32(rx_buffer),
+                   load_le32(rx_buffer + bytes - 16U));
+        return 1;
+    }
+
+    print_bandwidth("MM2S", bytes, mm2s_us);
+    print_bandwidth("S2MM", bytes, s2mm_us);
+    mm2s_mbps = bytes / mm2s_us;
+    s2mm_mbps = bytes / s2mm_us;
+    if (mm2s_mbps < BANDWIDTH_TARGET_MBPS ||
+        s2mm_mbps < BANDWIDTH_TARGET_MBPS) {
+        xil_printf("FAIL: DMA bandwidth target MM2S=%u S2MM=%u target=%u\r\n",
+                   mm2s_mbps, s2mm_mbps, BANDWIDTH_TARGET_MBPS);
+        return 1;
+    }
+    xil_printf("PASS: standalone DMA bandwidth >= 500 MB/s per direction\r\n");
+    return 0;
 }
 
 static void print_perf(const char *name, u32 tasks, size_t tx_bytes,
@@ -122,9 +254,18 @@ static int builder_begin(mol_dma_builder_t *builder, u32 batch_flags,
                          u32 *batch_id)
 {
     *batch_id = next_batch_id++;
-    return mol_dma_builder_init(builder, tx_buffer, sizeof(tx_buffer),
+    return mol_dma_builder_init(builder, tx_buffer, DMA_BUFFER_BYTES,
                                 *batch_id, batch_flags,
                                 MOL_DMA_MAX_TRANSFER_WORDS);
+}
+
+static int tanimoto_builder_begin(mol_dma_builder_t *builder,
+                                  u32 batch_flags, u32 *batch_id)
+{
+    *batch_id = next_batch_id++;
+    return mol_dma_builder_init(builder, tanimoto_tx_buffer,
+                                TANIMOTO_TX_BUFFER_BYTES, *batch_id,
+                                batch_flags, MOL_DMA_MAX_TRANSFER_WORDS);
 }
 
 static int add_task(mol_dma_builder_t *builder, u32 job_id, u32 task_id,
@@ -149,6 +290,7 @@ static int execute_batch(mol_dma_builder_t *builder, u32 batch_id,
 {
     XTime start;
     XTime end;
+    size_t rx_capacity_bytes;
     int rc;
 
     if (builder->finalized == 0U) {
@@ -160,13 +302,46 @@ static int execute_batch(mol_dma_builder_t *builder, u32 batch_id,
         *tx_bytes = (size_t)builder->used_words * 4U;
     }
 
+    /* The builder has already reserved the exact worst-case response size.
+     * Using the global 2 MiB array size here made every small batch maintain
+     * and scan 2 MiB of cacheable memory, adding about 5.7 ms per transfer. */
+    rx_capacity_bytes = (size_t)builder->reserved_result_words * 4U;
+
     XTime_GetTime(&start);
-    rc = mol_dma_transfer_poll(&dma_device, tx_buffer, *tx_bytes,
-                               rx_buffer, sizeof(rx_buffer), batch_id,
-                               DMA_POLL_LIMIT, rx_bytes);
+    if (builder->buffer == tanimoto_tx_buffer) {
+        rc = mol_dma_transfer_poll_ex(
+            &dma_device, builder->buffer, *tx_bytes,
+            rx_buffer, rx_capacity_bytes, batch_id,
+            DMA_POLL_LIMIT, rx_bytes, MOL_DMA_TRANSFER_TX_UNCACHED);
+    } else {
+        rc = mol_dma_transfer_poll(&dma_device, builder->buffer, *tx_bytes,
+                                   rx_buffer, rx_capacity_bytes, batch_id,
+                                   DMA_POLL_LIMIT, rx_bytes);
+    }
     XTime_GetTime(&end);
     *transfer_us = elapsed_us(start, end);
     if (rc != MOL_DMA_OK) {
+        xil_printf("FAIL: DMA transfer batch=%u rc=%d mm2s=0x%08x "
+                   "s2mm=0x%08x tx=%u rx_capacity=%u\r\n",
+                   batch_id, rc, dma_device.last_mm2s_status,
+                   dma_device.last_s2mm_status, (u32)*tx_bytes,
+                   (u32)rx_capacity_bytes);
+        if (batch_id == 1U) {
+            xil_printf("DBG_DMA mm2s_cr=0x%08x sr=0x%08x src=0x%08x "
+                       "len=0x%08x\r\n",
+                       Xil_In32(0x80400000U), Xil_In32(0x80400004U),
+                       Xil_In32(0x80400018U), Xil_In32(0x80400028U));
+            xil_printf("DBG_DMA s2mm_cr=0x%08x sr=0x%08x dst=0x%08x "
+                       "len=0x%08x\r\n",
+                       Xil_In32(0x80400030U), Xil_In32(0x80400034U),
+                       Xil_In32(0x80400048U), Xil_In32(0x80400058U));
+            xil_printf("DBG_AFI0 rd_ctrl=0x%08x rd_issue=0x%08x "
+                       "rd_fifo=0x%08x wr_ctrl=0x%08x "
+                       "wr_issue=0x%08x wr_fifo=0x%08x\r\n",
+                       Xil_In32(0xF8008000U), Xil_In32(0xF8008004U),
+                       Xil_In32(0xF800800CU), Xil_In32(0xF8008014U),
+                       Xil_In32(0xF8008018U), Xil_In32(0xF8008020U));
+        }
         return rc;
     }
     return mol_dma_results_open(iterator, rx_buffer, *rx_bytes, batch_id);
@@ -196,7 +371,7 @@ static int pure_layout_self_test(void)
     u32 total_words = 25U;
     int rc;
 
-    rc = mol_dma_builder_init(&builder, tx_buffer, sizeof(tx_buffer),
+    rc = mol_dma_builder_init(&builder, tx_buffer, DMA_BUFFER_BYTES,
                               0x11223344U, 0U, 64U);
     if (rc != MOL_DMA_OK) {
         return 1;
@@ -313,7 +488,10 @@ static int run_tanimoto_references(void)
     return 0;
 }
 
-static int run_shared_tanimoto_64(void)
+static int run_shared_tanimoto_groups(u32 group_count, const char *name,
+                                      u32 first_job_id,
+                                      int enforce_single_target,
+                                      int print_pure_core)
 {
     mol_dma_builder_t builder;
     mol_dma_result_iterator_t iterator;
@@ -323,28 +501,94 @@ static int run_shared_tanimoto_64(void)
     u32 batch_id;
     u32 us;
     u32 baseline_us;
+    u32 compute_cycles = 0U;
+    u32 pure_speedup_x100;
+    u32 group;
     u32 index;
 
     fill_tanimoto_shared(64U);
-    if (builder_begin(&builder, 0U, &batch_id) != MOL_DMA_OK ||
-        add_task(&builder, 200U, MOL_DMA_TASK_TANIMOTO,
-                 MOL_DMA_FLAG_SHARED_QUERY, 64U, 1000000U) != MOL_DMA_OK ||
-        execute_batch(&builder, batch_id, &iterator,
-                      &tx_bytes, &rx_bytes, &us) != MOL_DMA_OK ||
-        expect_record(&iterator, 200U, MOL_DMA_TASK_TANIMOTO,
-                      MOL_DMA_STATUS_OK, &view) != 0 ||
-        view.result_words != 64U) {
+    if (tanimoto_builder_begin(&builder, 0U, &batch_id) != MOL_DMA_OK) {
         return 1;
     }
-    for (index = 0U; index < 64U; ++index) {
-        if (load_le32(view.payload + index * 4U) != 0x00010000U) {
+    for (group = 0U; group < group_count; ++group) {
+        if (add_task(&builder, first_job_id + group,
+                     MOL_DMA_TASK_TANIMOTO,
+                     MOL_DMA_FLAG_SHARED_QUERY, 64U,
+                     1000000U) != MOL_DMA_OK) {
             return 1;
         }
     }
-    baseline_us = legacy_tanimoto_batch_us(64U);
-    xil_printf("PASS: DMA shared-query Tanimoto N=64\r\n");
-    print_perf("tanimoto_shared64", 64U, tx_bytes, rx_bytes, us, baseline_us);
+    if (execute_batch(&builder, batch_id, &iterator,
+                      &tx_bytes, &rx_bytes, &us) != MOL_DMA_OK) {
+        return 1;
+    }
+    for (group = 0U; group < group_count; ++group) {
+        if (expect_record(&iterator, first_job_id + group,
+                          MOL_DMA_TASK_TANIMOTO,
+                          MOL_DMA_STATUS_OK, &view) != 0 ||
+            view.result_words != 64U) {
+            return 1;
+        }
+        compute_cycles += (u32)view.compute_cycles;
+        for (index = 0U; index < 64U; ++index) {
+            if (load_le32(view.payload + index * 4U) != 0x00010000U) {
+                return 1;
+            }
+        }
+    }
+    baseline_us = legacy_tanimoto_batch_us(64U * group_count);
+    xil_printf("PASS: DMA shared-query Tanimoto groups=%u N=64 results=%u\r\n",
+               group_count, 64U * group_count);
+    print_perf(name, 64U * group_count,
+               tx_bytes, rx_bytes, us, baseline_us);
+    xil_printf("PROFILE name=%s tx_flush_us=%u "
+               "rx_flush_us=%u engine_us=%u rx_invalidate_us=%u "
+               "parse_us=%u\r\n",
+               name,
+               ticks_to_us(dma_device.last_tx_flush_ticks),
+               ticks_to_us(dma_device.last_rx_flush_ticks),
+               ticks_to_us(dma_device.last_engine_ticks),
+               ticks_to_us(dma_device.last_rx_invalidate_ticks),
+               ticks_to_us(dma_device.last_parse_ticks));
+    /* Per-record compute_cycles starts after the full task payload has been
+     * forwarded, so for shared-query tasks it measures only the final queue
+     * drain and must not be presented as per-comparison core latency. */
+    xil_printf("PROFILE_QUEUE name=%s post_payload_cycles=%u\r\n",
+               name, compute_cycles);
+    if (print_pure_core != 0) {
+        pure_speedup_x100 =
+            (u32)(((u64)PY_TANIMOTO_US * 10000ULL) /
+                  TANIMOTO_CORE_LATENCY_CYCLES);
+        xil_printf("PERF_PURE name=tanimoto_core latency_cycles=%u "
+                   "compute_us=%u.%02u speedup=%u.%02u "
+                   "source=tb_tanimoto_latency\r\n",
+                   TANIMOTO_CORE_LATENCY_CYCLES,
+                   TANIMOTO_CORE_LATENCY_CYCLES / 100U,
+                   TANIMOTO_CORE_LATENCY_CYCLES % 100U,
+                   pure_speedup_x100 / 100U, pure_speedup_x100 % 100U);
+    }
+    if (enforce_single_target != 0 &&
+        ((u64)baseline_us * 100ULL) < ((u64)us * 2000ULL)) {
+        xil_printf("FAIL: single shared-query Tanimoto N64 speedup below "
+                   "20.00x baseline_us=%u dma_us=%u\r\n",
+                   baseline_us, us);
+        return 1;
+    }
     return 0;
+}
+
+static int run_shared_tanimoto_64(void)
+{
+    int failures = 0;
+
+    /* The single request is the acceptance case.  The eight-request batch is
+     * retained separately as sustained-throughput evidence only. */
+    failures += run_shared_tanimoto_groups(1U, "tanimoto_shared64",
+                                           200U, 1, 1);
+    failures += run_shared_tanimoto_groups(TANIMOTO_BATCH_GROUPS,
+                                           "tanimoto_shared64_x8",
+                                           220U, 0, 0);
+    return failures;
 }
 
 static int run_gnn_modes(void)
@@ -626,10 +870,17 @@ int main(void)
         return 1;
     }
 
+    Xil_DCacheFlushRange((UINTPTR)tanimoto_tx_buffer,
+                         TANIMOTO_TX_BUFFER_BYTES);
+    Xil_SetTlbAttributes((INTPTR)tanimoto_tx_buffer, NORM_NONCACHE);
+    xil_printf("INFO: shared Tanimoto TX region non-cacheable at 0x%08x\r\n",
+               (u32)(UINTPTR)tanimoto_tx_buffer);
+
     xil_printf("INFO: configuring reference GNN/ADMET weights\r\n");
     accel_configure_reference_gnn_weights();
     accel_configure_reference_admet_weights();
 
+    failures += run_standalone_bandwidth();
     failures += run_tanimoto_references();
     failures += run_shared_tanimoto_64();
     failures += run_gnn_modes();

@@ -53,7 +53,9 @@ foreach name {
     generator_accelerator_0
     dma_ctrl_protocol_converter
     axi_dma_0
-    dma_mem_smartconnect
+    dma_mm2s_dwidth
+    dma_s2mm_dwidth
+    dma_mem_interconnect
     axis_job_fifo
     axis_result_fifo
     rst_ps7_0_100M
@@ -94,9 +96,11 @@ check_intf_link axi_dma_0/M_AXIS_MM2S axis_job_fifo/S_AXIS
 check_intf_link axis_job_fifo/M_AXIS generator_accelerator_0/s_axis_job
 check_intf_link generator_accelerator_0/m_axis_result axis_result_fifo/S_AXIS
 check_intf_link axis_result_fifo/M_AXIS axi_dma_0/S_AXIS_S2MM
-check_intf_link axi_dma_0/M_AXI_MM2S dma_mem_smartconnect/S00_AXI
-check_intf_link axi_dma_0/M_AXI_S2MM dma_mem_smartconnect/S01_AXI
-check_intf_link dma_mem_smartconnect/M00_AXI processing_system7_0/S_AXI_HP0
+check_intf_link axi_dma_0/M_AXI_MM2S dma_mm2s_dwidth/S_AXI
+check_intf_link axi_dma_0/M_AXI_S2MM dma_s2mm_dwidth/S_AXI
+check_intf_link dma_mm2s_dwidth/M_AXI dma_mem_interconnect/S00_AXI
+check_intf_link dma_s2mm_dwidth/M_AXI dma_mem_interconnect/S01_AXI
+check_intf_link dma_mem_interconnect/M00_AXI processing_system7_0/S_AXI_HP0
 
 foreach pin {
     processing_system7_0/M_AXI_GP0_ACLK
@@ -117,7 +121,12 @@ foreach pin {
     axi_dma_0/m_axi_s2mm_aclk
     axis_job_fifo/s_axis_aclk
     axis_result_fifo/m_axis_aclk
-    dma_mem_smartconnect/aclk
+    dma_mm2s_dwidth/s_axi_aclk
+    dma_s2mm_dwidth/s_axi_aclk
+    dma_mem_interconnect/ACLK
+    dma_mem_interconnect/S00_ACLK
+    dma_mem_interconnect/S01_ACLK
+    dma_mem_interconnect/M00_ACLK
 } {
     check_pin_net $pin processing_system7_0/FCLK_CLK1
 }
@@ -126,6 +135,12 @@ check_pin_net dma_irq_concat/dout processing_system7_0/IRQ_F2P
 check_pin_net axi_dma_0/mm2s_introut dma_irq_concat/In0
 check_pin_net axi_dma_0/s2mm_introut dma_irq_concat/In1
 check_pin_net rst_ps7_0_150M/ext_reset_in processing_system7_0/FCLK_RESET1_N
+check_pin_net rst_ps7_0_150M/aux_reset_in reset_const_1/dout
+set rst150_cell [get_bd_cells -quiet rst_ps7_0_150M]
+if {[llength $rst150_cell] == 1 &&
+    [get_property CONFIG.C_AUX_RESET_HIGH $rst150_cell] ne "0"} {
+    lappend failures "rst_ps7_0_150M auxiliary reset is not active-low"
+}
 foreach pin {
     dma_ctrl_protocol_converter/aresetn
     generator_accelerator_0/s_axi_aresetn
@@ -136,7 +151,12 @@ foreach pin {
 }
 foreach pin {
     axis_job_fifo/s_axis_aresetn
-    dma_mem_smartconnect/aresetn
+    dma_mm2s_dwidth/s_axi_aresetn
+    dma_s2mm_dwidth/s_axi_aresetn
+    dma_mem_interconnect/ARESETN
+    dma_mem_interconnect/S00_ARESETN
+    dma_mem_interconnect/S01_ARESETN
+    dma_mem_interconnect/M00_ARESETN
 } {
     check_pin_net $pin rst_ps7_0_150M/peripheral_aresetn
 }
@@ -157,6 +177,22 @@ if {[llength $dma] == 1} {
     } {
         if {[get_property $property $dma] ne $expected} {
             lappend failures "$property is not $expected"
+        }
+    }
+}
+
+foreach converter_name {dma_mm2s_dwidth dma_s2mm_dwidth} {
+    set converter [get_bd_cells -quiet $converter_name]
+    if {[llength $converter] == 1} {
+        foreach {property expected} {
+            CONFIG.PROTOCOL AXI4
+            CONFIG.ADDR_WIDTH 32
+            CONFIG.SI_DATA_WIDTH 128
+            CONFIG.MI_DATA_WIDTH 64
+        } {
+            if {[get_property $property $converter] ne $expected} {
+                lappend failures "$converter_name $property is not $expected"
+            }
         }
     }
 }

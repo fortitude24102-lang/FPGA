@@ -27,7 +27,10 @@ foreach old_cell {
     ps_axi3_lite_bridge_dma
     dma_ctrl_protocol_converter
     axi_dma_0
+    dma_mm2s_dwidth
+    dma_s2mm_dwidth
     dma_mem_smartconnect
+    dma_mem_interconnect
     axis_job_fifo
     axis_result_fifo
     rst_ps7_0_150M
@@ -86,6 +89,28 @@ set_property -dict [list \
     CONFIG.c_sg_length_width {23} \
 ] $dma
 
+# AXI DMA 7.1 requires its memory-mapped ports to be at least as wide as the
+# configured 128-bit stream.  Convert each DDR channel explicitly to the
+# Zynq-7000 HP0 port's native 64-bit width instead of relying on an implicit
+# SmartConnect conversion.
+set mm2s_dwidth [create_bd_cell -type ip \
+    -vlnv xilinx.com:ip:axi_dwidth_converter:2.1 dma_mm2s_dwidth]
+set_property -dict [list \
+    CONFIG.PROTOCOL {AXI4} \
+    CONFIG.ADDR_WIDTH {32} \
+    CONFIG.SI_DATA_WIDTH {128} \
+    CONFIG.MI_DATA_WIDTH {64} \
+] $mm2s_dwidth
+
+set s2mm_dwidth [create_bd_cell -type ip \
+    -vlnv xilinx.com:ip:axi_dwidth_converter:2.1 dma_s2mm_dwidth]
+set_property -dict [list \
+    CONFIG.PROTOCOL {AXI4} \
+    CONFIG.ADDR_WIDTH {32} \
+    CONFIG.SI_DATA_WIDTH {128} \
+    CONFIG.MI_DATA_WIDTH {64} \
+] $s2mm_dwidth
+
 set job_fifo [create_bd_cell -type ip \
     -vlnv xilinx.com:ip:axis_data_fifo:2.0 axis_job_fifo]
 set_property -dict [list \
@@ -106,9 +131,9 @@ set_property -dict [list \
     CONFIG.IS_ACLK_ASYNC {1} \
 ] $result_fifo
 
-set mem_sc [create_bd_cell -type ip \
-    -vlnv xilinx.com:ip:smartconnect:1.0 dma_mem_smartconnect]
-set_property -dict [list CONFIG.NUM_SI {2} CONFIG.NUM_MI {1}] $mem_sc
+set mem_ic [create_bd_cell -type ip \
+    -vlnv xilinx.com:ip:axi_interconnect:2.1 dma_mem_interconnect]
+set_property -dict [list CONFIG.NUM_SI {2} CONFIG.NUM_MI {1}] $mem_ic
 
 set rst150 [create_bd_cell -type ip \
     -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_ps7_0_150M]
@@ -137,13 +162,18 @@ connect_bd_intf_net [get_bd_intf_pins $accel/m_axis_result] \
 connect_bd_intf_net [get_bd_intf_pins $result_fifo/M_AXIS] \
     [get_bd_intf_pins $dma/S_AXIS_S2MM]
 
-# Both 64-bit DMA memory masters share the PS HP0 DDR port through a
-# two-input SmartConnect.  All three sides of this fabric run at 150 MHz.
+# Both 128-bit DMA memory masters are converted to native 64-bit HP0 AXI4,
+# then share the PS DDR port through a two-input AXI Interconnect.  The complete
+# memory fabric runs at 150 MHz.
 connect_bd_intf_net [get_bd_intf_pins $dma/M_AXI_MM2S] \
-    [get_bd_intf_pins $mem_sc/S00_AXI]
+    [get_bd_intf_pins $mm2s_dwidth/S_AXI]
 connect_bd_intf_net [get_bd_intf_pins $dma/M_AXI_S2MM] \
-    [get_bd_intf_pins $mem_sc/S01_AXI]
-connect_bd_intf_net [get_bd_intf_pins $mem_sc/M00_AXI] \
+    [get_bd_intf_pins $s2mm_dwidth/S_AXI]
+connect_bd_intf_net [get_bd_intf_pins $mm2s_dwidth/M_AXI] \
+    [get_bd_intf_pins $mem_ic/S00_AXI]
+connect_bd_intf_net [get_bd_intf_pins $s2mm_dwidth/M_AXI] \
+    [get_bd_intf_pins $mem_ic/S01_AXI]
+connect_bd_intf_net [get_bd_intf_pins $mem_ic/M00_AXI] \
     [get_bd_intf_pins $ps/S_AXI_HP0]
 
 set clk100 [get_bd_pins $ps/FCLK_CLK0]
@@ -166,15 +196,24 @@ connect_bd_net $clk150 \
     [get_bd_pins $dma/m_axi_s2mm_aclk] \
     [get_bd_pins $job_fifo/s_axis_aclk] \
     [get_bd_pins $result_fifo/m_axis_aclk] \
-    [get_bd_pins $mem_sc/aclk] \
+    [get_bd_pins $mm2s_dwidth/s_axi_aclk] \
+    [get_bd_pins $s2mm_dwidth/s_axi_aclk] \
+    [get_bd_pins $mem_ic/ACLK] \
+    [get_bd_pins $mem_ic/S00_ACLK] \
+    [get_bd_pins $mem_ic/S01_ACLK] \
+    [get_bd_pins $mem_ic/M00_ACLK] \
     [get_bd_pins $rst150/slowest_sync_clk]
 
+# Use the FCLK1 reset source associated with the 150 MHz memory domain.
 connect_bd_net [get_bd_pins $ps/FCLK_RESET1_N] \
     [get_bd_pins $rst150/ext_reset_in]
+# This newly created proc_sys_reset instance has C_AUX_RESET_HIGH=0 in
+# Vivado 2019.2.  Tie aux_reset_in high (inactive); tying it to reset_const_0
+# permanently held the complete 150 MHz DMA/HP0 domain in reset on hardware.
 connect_bd_net [get_bd_pins reset_const_0/dout] \
-    [get_bd_pins $rst150/aux_reset_in] \
     [get_bd_pins $rst150/mb_debug_sys_rst]
 connect_bd_net [get_bd_pins reset_const_1/dout] \
+    [get_bd_pins $rst150/aux_reset_in] \
     [get_bd_pins $rst150/dcm_locked]
 
 set reset100n [get_bd_pins rst_ps7_0_100M/peripheral_aresetn]
@@ -187,7 +226,12 @@ connect_bd_net $reset100n \
     [get_bd_pins $result_fifo/s_axis_aresetn]
 connect_bd_net $reset150n \
     [get_bd_pins $job_fifo/s_axis_aresetn] \
-    [get_bd_pins $mem_sc/aresetn]
+    [get_bd_pins $mm2s_dwidth/s_axi_aresetn] \
+    [get_bd_pins $s2mm_dwidth/s_axi_aresetn] \
+    [get_bd_pins $mem_ic/ARESETN] \
+    [get_bd_pins $mem_ic/S00_ARESETN] \
+    [get_bd_pins $mem_ic/S01_ARESETN] \
+    [get_bd_pins $mem_ic/M00_ARESETN]
 
 connect_bd_net [get_bd_pins $dma/mm2s_introut] \
     [get_bd_pins $irq_concat/In0]

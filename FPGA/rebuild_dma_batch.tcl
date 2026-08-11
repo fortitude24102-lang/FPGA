@@ -57,13 +57,38 @@ update_ip_catalog
 # add_dma_batch_system.tcl, and also keeps repeated rebuilds byte-stable.
 set bd_file [file join $script_dir FPGA.srcs sources_1 bd system system.bd]
 open_bd_design $bd_file
+set locked_accel_ips [get_ips -quiet -filter \
+    {IS_LOCKED == 1 && NAME =~ "system_generator_accelerator_*"}]
+if {[llength $locked_accel_ips] != 0} {
+    puts "UPGRADE_ACCELERATOR_IP=$locked_accel_ips"
+    upgrade_ip $locked_accel_ips
+}
 validate_bd_design
 save_bd_design
 set bd_object [get_files -quiet $bd_file]
 reset_target all $bd_object
 generate_target all $bd_object
+create_ip_run $bd_object
 close_bd_design [get_bd_designs system]
 update_compile_order -fileset sources_1
+
+# Custom IP sources can change without Vivado invalidating an already complete
+# block-design OOC run.  Reset and rebuild the accelerator DCP explicitly so a
+# production candidate can never silently reuse stale RTL.
+set accel_ooc_runs [get_runs -quiet -filter \
+    {NAME =~ "system_generator_accelerator_*_synth_1"}]
+if {[llength $accel_ooc_runs] == 0} {
+    error "accelerator OOC synthesis run was not found"
+}
+foreach accel_ooc_run $accel_ooc_runs {
+    puts "RESET_ACCELERATOR_OOC=[get_property NAME $accel_ooc_run]"
+    reset_run $accel_ooc_run
+}
+launch_runs $accel_ooc_runs -jobs 4
+foreach accel_ooc_run $accel_ooc_runs {
+    wait_on_run $accel_ooc_run
+    require_complete_run [get_property NAME $accel_ooc_run]
+}
 
 set synth_run [get_runs synth_1]
 set impl_run [get_runs impl_1]
@@ -108,7 +133,7 @@ report_drc -file [file join $impl_report_dir drc.rpt]
 set drc_errors [llength [get_drc_violations -quiet \
     -filter {SEVERITY == Error}]]
 report_methodology -file [file join $impl_report_dir methodology_drc.rpt]
-set methodology_errors [llength [get_drc_violations -quiet \
+set methodology_errors [llength [get_methodology_violations -quiet \
     -filter {SEVERITY == Error}]]
 
 set run_bit [file join $script_dir FPGA.runs impl_1 system_wrapper.bit]

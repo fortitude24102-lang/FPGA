@@ -502,6 +502,7 @@ int mol_dma_find_response_bytes(const void *buffer, size_t capacity_bytes,
 #include "xaxidma_hw.h"
 #include "xil_cache.h"
 #include "xstatus.h"
+#include "xtime_l.h"
 
 static uint32_t dma_channel_status(const mol_dma_device_t *device,
                                    int direction)
@@ -553,19 +554,23 @@ int mol_dma_device_init(mol_dma_device_t *device, uint16_t device_id,
     return mol_dma_device_reset(device, reset_poll_limit);
 }
 
-int mol_dma_transfer_poll(mol_dma_device_t *device,
-                          const void *tx_buffer, size_t tx_bytes,
-                          void *rx_buffer, size_t rx_capacity_bytes,
-                          uint32_t expected_batch_id,
-                          uint32_t poll_limit, size_t *response_bytes)
+int mol_dma_transfer_poll_ex(mol_dma_device_t *device,
+                             const void *tx_buffer, size_t tx_bytes,
+                             void *rx_buffer, size_t rx_capacity_bytes,
+                             uint32_t expected_batch_id,
+                             uint32_t poll_limit, size_t *response_bytes,
+                             uint32_t transfer_flags)
 {
     uint32_t poll;
+    XTime phase_start;
+    XTime phase_end;
     int status;
     int rc;
 
     if (device == NULL || device->initialized == 0U ||
         tx_buffer == NULL || rx_buffer == NULL || response_bytes == NULL ||
-        poll_limit == 0U) {
+        poll_limit == 0U ||
+        (transfer_flags & ~MOL_DMA_TRANSFER_TX_UNCACHED) != 0U) {
         return MOL_DMA_ERR_ARGUMENT;
     }
     if (!is_aligned_64(tx_buffer) || !is_aligned_64(rx_buffer)) {
@@ -578,12 +583,26 @@ int mol_dma_transfer_poll(mol_dma_device_t *device,
         return MOL_DMA_ERR_RANGE;
     }
 
-    Xil_DCacheFlushRange((UINTPTR)tx_buffer, (uint32_t)tx_bytes);
+    device->last_tx_flush_ticks = 0U;
+    device->last_rx_flush_ticks = 0U;
+    device->last_engine_ticks = 0U;
+    device->last_rx_invalidate_ticks = 0U;
+    device->last_parse_ticks = 0U;
+
+    if ((transfer_flags & MOL_DMA_TRANSFER_TX_UNCACHED) == 0U) {
+        XTime_GetTime(&phase_start);
+        Xil_DCacheFlushRange((UINTPTR)tx_buffer, (uint32_t)tx_bytes);
+        XTime_GetTime(&phase_end);
+        device->last_tx_flush_ticks = (uint64_t)(phase_end - phase_start);
+    }
+
+    XTime_GetTime(&phase_start);
     Xil_DCacheFlushRange((UINTPTR)rx_buffer, (uint32_t)rx_capacity_bytes);
-    Xil_DCacheInvalidateRange((UINTPTR)rx_buffer,
-                              (uint32_t)rx_capacity_bytes);
+    XTime_GetTime(&phase_end);
+    device->last_rx_flush_ticks = (uint64_t)(phase_end - phase_start);
 
     /* Arm S2MM first so no result beat can be lost when MM2S starts. */
+    XTime_GetTime(&phase_start);
     status = XAxiDma_SimpleTransfer(&device->instance, (UINTPTR)rx_buffer,
                                     (uint32_t)rx_capacity_bytes,
                                     XAXIDMA_DEVICE_TO_DMA);
@@ -609,8 +628,10 @@ int mol_dma_transfer_poll(mol_dma_device_t *device,
             (void)mol_dma_device_reset(device, poll_limit);
             return MOL_DMA_ERR_HARDWARE;
         }
-        if (!XAxiDma_Busy(&device->instance, XAXIDMA_DMA_TO_DEVICE) &&
-            !XAxiDma_Busy(&device->instance, XAXIDMA_DEVICE_TO_DMA)) {
+        /* Avoid XAxiDma_Busy(): it rereads both status registers that were
+         * already sampled above.  GP1 AXI-Lite reads dominate short batches. */
+        if (((device->last_mm2s_status & XAXIDMA_IDLE_MASK) != 0U) &&
+            ((device->last_s2mm_status & XAXIDMA_IDLE_MASK) != 0U)) {
             break;
         }
     }
@@ -618,14 +639,32 @@ int mol_dma_transfer_poll(mol_dma_device_t *device,
         (void)mol_dma_device_reset(device, poll_limit);
         return MOL_DMA_ERR_TIMEOUT;
     }
+    XTime_GetTime(&phase_end);
+    device->last_engine_ticks = (uint64_t)(phase_end - phase_start);
 
+    XTime_GetTime(&phase_start);
     Xil_DCacheInvalidateRange((UINTPTR)rx_buffer,
                               (uint32_t)rx_capacity_bytes);
+    XTime_GetTime(&phase_end);
+    device->last_rx_invalidate_ticks = (uint64_t)(phase_end - phase_start);
+
+    XTime_GetTime(&phase_start);
     rc = mol_dma_find_response_bytes(rx_buffer, rx_capacity_bytes,
                                      expected_batch_id, response_bytes);
-    if (rc != MOL_DMA_OK) {
-        (void)mol_dma_device_reset(device, poll_limit);
-    }
+    XTime_GetTime(&phase_end);
+    device->last_parse_ticks = (uint64_t)(phase_end - phase_start);
     return rc;
+}
+
+int mol_dma_transfer_poll(mol_dma_device_t *device,
+                          const void *tx_buffer, size_t tx_bytes,
+                          void *rx_buffer, size_t rx_capacity_bytes,
+                          uint32_t expected_batch_id,
+                          uint32_t poll_limit, size_t *response_bytes)
+{
+    return mol_dma_transfer_poll_ex(device, tx_buffer, tx_bytes,
+                                    rx_buffer, rx_capacity_bytes,
+                                    expected_batch_id, poll_limit,
+                                    response_bytes, 0U);
 }
 #endif

@@ -1,7 +1,7 @@
 Copyright 1986-2019 Xilinx, Inc. All Rights Reserved.
 ------------------------------------------------------------------------------------
 | Tool Version : Vivado v.2019.2 (win64) Build 2708876 Wed Nov  6 21:40:23 MST 2019
-| Date         : Mon Aug 10 22:37:46 2026
+| Date         : Tue Aug 11 15:06:20 2026
 | Host         : LAPTOP-C1GK89UB running 64-bit major release  (build 9200)
 | Command      : report_clocks -file D:/FPGA/reports/dma_batch/impl/clocks.rpt
 | Design       : system_wrapper
@@ -45,3 +45,4 @@ User Jitter
 Clock       Jitter(ns)
 clk_fpga_0  0.300
 clk_fpga_1  0.200
+

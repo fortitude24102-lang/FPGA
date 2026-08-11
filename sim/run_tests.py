@@ -59,6 +59,13 @@ TESTS = {
             SIM / "tb_dma_task_queue_frontend_tasks.sv",
         ],
     ),
+    "dma_frontend_throughput": (
+        "tb_dma_frontend_throughput",
+        [
+            RTL / "dma_task_queue_frontend.v",
+            SIM / "tb_dma_frontend_throughput.sv",
+        ],
+    ),
     "tanimoto": (
         "tb_tanimoto",
         [RTL / "tanimoto_accelerator.v", SIM / "tb_tanimoto.sv"],
@@ -157,6 +164,29 @@ TESTS = {
             RTL / "dma_accelerator_backend.v",
             RTL / "generator_accelerator_top.v",
             SIM / "tb_top_dma_arbitration.sv",
+        ],
+    ),
+    "top_dma_bandwidth": (
+        "tb_top_dma_bandwidth",
+        [
+            RTL / "tanimoto_accelerator.v",
+            RTL / "gnn_message_passing.v",
+            RTL / "fc_network.v",
+            RTL / "admet_predictor.v",
+            RTL / "tanimoto_stream_batch.v",
+            RTL / "dma_task_queue_frontend.v",
+            RTL / "dma_task_queue.v",
+            RTL / "dma_result_formatter.v",
+            RTL / "dma_accelerator_backend.v",
+            RTL / "generator_accelerator_top.v",
+            SIM / "tb_top_dma_bandwidth.sv",
+        ],
+    ),
+    "dma_backend_shared_overlap": (
+        "tb_dma_backend_shared_overlap",
+        [
+            RTL / "dma_accelerator_backend.v",
+            SIM / "tb_dma_backend_shared_overlap.sv",
         ],
     ),
     "pipeline_latency": (

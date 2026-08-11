@@ -366,7 +366,7 @@
         <spirit:parameters>
           <spirit:parameter>
             <spirit:name>viewChecksum</spirit:name>
-            <spirit:value>7057cd03</spirit:value>
+            <spirit:value>5709f7e7</spirit:value>
           </spirit:parameter>
         </spirit:parameters>
       </spirit:view>
@@ -382,7 +382,7 @@
         <spirit:parameters>
           <spirit:parameter>
             <spirit:name>viewChecksum</spirit:name>
-            <spirit:value>7057cd03</spirit:value>
+            <spirit:value>5709f7e7</spirit:value>
           </spirit:parameter>
         </spirit:parameters>
       </spirit:view>
@@ -396,7 +396,7 @@
         <spirit:parameters>
           <spirit:parameter>
             <spirit:name>viewChecksum</spirit:name>
-            <spirit:value>457fcf64</spirit:value>
+            <spirit:value>38795a55</spirit:value>
           </spirit:parameter>
         </spirit:parameters>
       </spirit:view>
@@ -1135,7 +1135,7 @@
       <xilinx:xilinxVersion>2019.2</xilinx:xilinxVersion>
       <xilinx:checksum xilinx:scope="busInterfaces" xilinx:value="fb66d325"/>
       <xilinx:checksum xilinx:scope="memoryMaps" xilinx:value="ae6d2322"/>
-      <xilinx:checksum xilinx:scope="fileGroups" xilinx:value="93608a3d"/>
+      <xilinx:checksum xilinx:scope="fileGroups" xilinx:value="7df773cb"/>
       <xilinx:checksum xilinx:scope="ports" xilinx:value="63015502"/>
       <xilinx:checksum xilinx:scope="hdlParameters" xilinx:value="1f69757c"/>
       <xilinx:checksum xilinx:scope="parameters" xilinx:value="2a296762"/>

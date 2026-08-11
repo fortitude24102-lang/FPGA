@@ -97,6 +97,11 @@ typedef struct {
     uint32_t initialized;
     uint32_t last_mm2s_status;
     uint32_t last_s2mm_status;
+    uint64_t last_tx_flush_ticks;
+    uint64_t last_rx_flush_ticks;
+    uint64_t last_engine_ticks;
+    uint64_t last_rx_invalidate_ticks;
+    uint64_t last_parse_ticks;
 } mol_dma_device_t;
 
 int mol_dma_device_init(mol_dma_device_t *device, uint16_t device_id,
@@ -108,6 +113,13 @@ int mol_dma_transfer_poll(mol_dma_device_t *device,
                           void *rx_buffer, size_t rx_capacity_bytes,
                           uint32_t expected_batch_id,
                           uint32_t poll_limit, size_t *response_bytes);
+#define MOL_DMA_TRANSFER_TX_UNCACHED 0x00000001U
+int mol_dma_transfer_poll_ex(mol_dma_device_t *device,
+                             const void *tx_buffer, size_t tx_bytes,
+                             void *rx_buffer, size_t rx_capacity_bytes,
+                             uint32_t expected_batch_id,
+                             uint32_t poll_limit, size_t *response_bytes,
+                             uint32_t transfer_flags);
 #endif
 
 #ifdef __cplusplus

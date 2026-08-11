@@ -147,7 +147,15 @@ module dma_accelerator_backend #(
 
     assign task_ready = (state == ST_IDLE) && !tanimoto_busy &&
                         !gnn_busy && !admet_busy;
-    assign payload_ready = (state == ST_LOAD);
+    wire [31:0] shared_payload_words =
+        32'd32 + ({25'd0, active_items} << 5);
+    /* Once the core has sampled a completed candidate, its popcount inputs
+     * are registered.  Stream the next candidate into the database RAM while
+     * the previous comparison is finishing instead of inserting five idle
+     * core cycles between every pair. */
+    assign payload_ready = (state == ST_LOAD) ||
+        ((state == ST_WAIT_SHARED) && shared_mode &&
+         (payload_index < shared_payload_words));
     assign done_valid = (state == ST_DONE);
     assign done_status = 24'd0;
     assign done_result_words = result_words_reg;
@@ -379,13 +387,24 @@ module dma_accelerator_backend #(
                             state <= ST_WAIT_TANI;
                     end
 
-                    ST_WAIT_SHARED: if (tanimoto_valid) begin
-                        shared_result_count <= shared_result_count + 1'b1;
-                        if (shared_result_count + 1 == active_items) begin
-                            result_words_reg <= active_items;
-                            state <= ST_DONE;
-                        end else begin
-                            state <= ST_LOAD;
+                    ST_WAIT_SHARED: begin
+                        if (payload_valid && payload_ready) begin
+                            payload_index <= payload_index + 1'b1;
+                            fingerprint_we <= 1'b1;
+                            fingerprint_db_select <= 1'b1;
+                            fingerprint_addr <= payload_index[4:0];
+                            fingerprint_wdata <= payload_data;
+                            if (payload_index >= 63 &&
+                                payload_index[4:0] == 31)
+                                state <= ST_START_TANI;
+                        end
+                        if (tanimoto_valid) begin
+                            shared_result_count <=
+                                shared_result_count + 1'b1;
+                            if (shared_result_count + 1 == active_items) begin
+                                result_words_reg <= active_items;
+                                state <= ST_DONE;
+                            end
                         end
                     end
 

@@ -5,6 +5,8 @@
 // Register map (byte addresses):
 //   0x0000 control: bit0=start, bits[2:1]=task, bit8=clear status
 //   0x0004 status : bit0=busy, bit1=done, bit2=error, bits[5:4]=task
+//   0x0008 DMA test mode: 0=normal, 1=loopback, 2=MM2S sink, 3=S2MM source
+//   0x000c DMA test source length in 128-bit beats
 //   0x0100-0x017c query fingerprint (32 x 32-bit words)
 //   0x0180-0x01fc database fingerprint (32 x 32-bit words)
 //   0x0200          Tanimoto result, unsigned Q16.16
@@ -112,6 +114,8 @@ module generator_accelerator_top #(
 
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_CONTROL      = 18'h00000;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_STATUS       = 18'h00004;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_DMA_TEST_MODE= 18'h00008;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_DMA_TEST_BEATS=18'h0000c;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_QUERY_BASE   = 18'h00100;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_DB_BASE      = 18'h00180;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_TANI_RESULT  = 18'h00200;
@@ -138,6 +142,9 @@ module generator_accelerator_top #(
     reg command_start;
     reg command_clear;
     reg [1:0] command_task;
+    reg [1:0] dma_test_mode;
+    reg [31:0] dma_test_beats;
+    reg [31:0] dma_test_source_index;
     reg [DATA_WIDTH-1:0] gnn_weight_data_reg;
     reg [DATA_WIDTH-1:0] admet_weight_data_reg;
     reg gnn_weight_we;
@@ -212,6 +219,9 @@ module generator_accelerator_top #(
             command_start        <= 1'b0;
             command_clear        <= 1'b0;
             command_task         <= 2'd0;
+            dma_test_mode        <= 2'd0;
+            dma_test_beats       <= 32'd0;
+            dma_test_source_index<= 32'd0;
             gnn_weight_data_reg  <= {DATA_WIDTH{1'b0}};
             admet_weight_data_reg<= {DATA_WIDTH{1'b0}};
             gnn_weight_we        <= 1'b0;
@@ -244,6 +254,10 @@ module generator_accelerator_top #(
             legacy_query_we <= 1'b0;
             legacy_db_we <= 1'b0;
 
+            if (dma_test_mode == 2'd3 && m_axis_result_tready &&
+                dma_test_source_index < dma_test_beats)
+                dma_test_source_index <= dma_test_source_index + 32'd1;
+
             if (s_axi_awready && s_axi_awvalid) begin
                 held_awaddr <= s_axi_awaddr;
                 aw_held     <= 1'b1;
@@ -259,6 +273,11 @@ module generator_accelerator_top #(
                     command_task  <= held_wdata[2:1];
                     command_start <= held_wdata[0];
                     command_clear <= held_wdata[8];
+                end else if (held_awaddr == ADDR_DMA_TEST_MODE) begin
+                    dma_test_mode <= held_wdata[1:0];
+                    dma_test_source_index <= 32'd0;
+                end else if (held_awaddr == ADDR_DMA_TEST_BEATS) begin
+                    dma_test_beats <= held_wdata;
                 end else if (held_awaddr >= ADDR_QUERY_BASE &&
                              held_awaddr < ADDR_QUERY_BASE + 128) begin
                     legacy_query_we <= 1'b1;
@@ -491,14 +510,15 @@ module generator_accelerator_top #(
     wire [7:0] dma_end_status;
     wire [31:0] dma_end_detail;
     wire [31:0] dma_observed_words;
+    wire normal_job_tready;
 
     dma_task_queue_frontend u_dma_frontend (
         .aclk(s_axi_aclk),
         .aresetn(s_axi_aresetn),
         .s_axis_job_tdata(s_axis_job_tdata),
         .s_axis_job_tkeep(s_axis_job_tkeep),
-        .s_axis_job_tvalid(s_axis_job_tvalid),
-        .s_axis_job_tready(s_axis_job_tready),
+        .s_axis_job_tvalid(s_axis_job_tvalid && (dma_test_mode == 2'd0)),
+        .s_axis_job_tready(normal_job_tready),
         .s_axis_job_tlast(s_axis_job_tlast),
         .batch_valid(dma_batch_valid),
         .batch_ready(dma_batch_ready),
@@ -559,6 +579,10 @@ module generator_accelerator_top #(
     wire [31:0] fmt_finish_batch_status;
     wire [31:0] fmt_finish_first_error_job_id;
     wire [31:0] fmt_finish_detail;
+    wire [127:0] normal_result_tdata;
+    wire [15:0] normal_result_tkeep;
+    wire normal_result_tvalid;
+    wire normal_result_tlast;
 
     wire backend_task_valid;
     wire backend_task_ready;
@@ -668,12 +692,37 @@ module generator_accelerator_top #(
         .finish_batch_status(fmt_finish_batch_status),
         .finish_first_error_job_id(fmt_finish_first_error_job_id),
         .finish_detail(fmt_finish_detail),
-        .m_axis_result_tdata(m_axis_result_tdata),
-        .m_axis_result_tkeep(m_axis_result_tkeep),
-        .m_axis_result_tvalid(m_axis_result_tvalid),
-        .m_axis_result_tready(m_axis_result_tready),
-        .m_axis_result_tlast(m_axis_result_tlast)
+        .m_axis_result_tdata(normal_result_tdata),
+        .m_axis_result_tkeep(normal_result_tkeep),
+        .m_axis_result_tvalid(normal_result_tvalid),
+        .m_axis_result_tready(m_axis_result_tready &&
+                              (dma_test_mode == 2'd0)),
+        .m_axis_result_tlast(normal_result_tlast)
     );
+
+    wire dma_test_source_valid = (dma_test_mode == 2'd3) &&
+                                 (dma_test_source_index < dma_test_beats);
+    wire [127:0] dma_test_source_data = {4{dma_test_source_index}};
+    wire dma_test_source_last = dma_test_source_valid &&
+        (dma_test_source_index + 32'd1 == dma_test_beats);
+
+    assign s_axis_job_tready =
+        (dma_test_mode == 2'd0) ? normal_job_tready :
+        (dma_test_mode == 2'd1) ? m_axis_result_tready :
+        (dma_test_mode == 2'd2);
+    assign m_axis_result_tdata =
+        (dma_test_mode == 2'd1) ? s_axis_job_tdata :
+        (dma_test_mode == 2'd3) ? dma_test_source_data : normal_result_tdata;
+    assign m_axis_result_tkeep =
+        (dma_test_mode == 2'd1) ? s_axis_job_tkeep :
+        (dma_test_mode == 2'd3) ? 16'hffff : normal_result_tkeep;
+    assign m_axis_result_tvalid =
+        (dma_test_mode == 2'd1) ? s_axis_job_tvalid :
+        (dma_test_mode == 2'd3) ? dma_test_source_valid :
+        (dma_test_mode == 2'd0) ? normal_result_tvalid : 1'b0;
+    assign m_axis_result_tlast =
+        (dma_test_mode == 2'd1) ? s_axis_job_tlast :
+        (dma_test_mode == 2'd3) ? dma_test_source_last : normal_result_tlast;
 
     dma_accelerator_backend #(
         .MAX_NODES(MAX_NODES), .FEATURE_DIM(FEATURE_DIM),
@@ -808,6 +857,10 @@ module generator_accelerator_top #(
             read_data_mux[1]   = done_sticky;
             read_data_mux[2]   = error_sticky;
             read_data_mux[5:4] = current_task;
+        end else if (s_axi_araddr == ADDR_DMA_TEST_MODE) begin
+            read_data_mux = {30'd0, dma_test_mode};
+        end else if (s_axi_araddr == ADDR_DMA_TEST_BEATS) begin
+            read_data_mux = dma_test_beats;
         end else if (s_axi_araddr >= ADDR_QUERY_BASE &&
                      s_axi_araddr < ADDR_QUERY_BASE + 128) begin
             read_data_mux = query_fingerprint[

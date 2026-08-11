@@ -217,9 +217,14 @@ module dma_task_queue_frontend (
                           (state == STATE_TASK_HEADER)) ? header_can_advance :
                          (state == STATE_PAYLOAD) ? payload_can_advance :
                          (state == STATE_DRAIN));
+    wire refill_ready = consume_word && current_is_last_lane;
 
     assign batch_end_valid = batch_end_valid_int && !batch_valid && !task_valid;
-    assign s_axis_job_tready = !beat_valid && !batch_end_valid_int;
+    /* Replace a fully consumed beat on the same edge.  The old implementation
+     * deasserted TREADY for an extra clock between every pair of 128-bit
+     * beats, reducing a four-lane payload path to 80% of its possible rate. */
+    assign s_axis_job_tready = (!beat_valid || refill_ready) &&
+                               !batch_end_valid_int;
 
     always @(posedge aclk) begin
         if (!aresetn) begin
@@ -296,8 +301,12 @@ module dma_task_queue_frontend (
 
             if (consume_word) begin
                 batch_observed_words <= batch_observed_words + 32'd1;
-                if (current_is_last_lane)
-                    beat_valid <= 1'b0;
+                if (current_is_last_lane) begin
+                    /* A simultaneous AXIS handshake has already loaded the
+                     * replacement beat above, so it must remain valid. */
+                    if (!(s_axis_job_tvalid && s_axis_job_tready))
+                        beat_valid <= 1'b0;
+                end
                 else
                     beat_lane <= beat_lane + 2'd1;
 
