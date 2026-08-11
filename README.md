@@ -75,24 +75,21 @@ python FPGA/check_dma_reports.py reports/dma_batch/impl
 
 ## Vivado 2019.2
 
-现有工程入口为 [`FPGA/FPGA.xpr`](FPGA/FPGA.xpr)。更新源文件集时，在
-Vivado Tcl Console 执行：
-
-```tcl
-source D:/FPGA/FPGA/update_project.tcl
-```
+现有工程入口为 [`FPGA/FPGA.xpr`](FPGA/FPGA.xpr)，综合顶层为
+`system_wrapper`。仓库中的 `FPGA/update_project.tcl` 是早期 AXI4-Lite
+独立顶层维护脚本，不适用于当前 DMA/PS Block Design 工程。
 
 重新生成 DMA/突发/批处理候选实现：
 
 ```powershell
 & 'D:\visit\Vivado\2019.2\bin\vivado.bat' -mode batch `
   -source 'D:\FPGA\FPGA\rebuild_dma_batch.tcl'
-python D:\FPGA\FPGA\check_dma_reports.py D:\FPGA\reports\dma_batch\impl
+python D:\FPGA\FPGA\check_dma_reports.py D:\FPGA\reports\candidate_dma_batch\impl
 ```
 
 该脚本把候选 bit/XSA 写入本地忽略的 `artifacts/candidate_dma_batch/`，
-避免自动覆盖正式交付物。候选通过报告门禁和实板回归后，再显式晋升为
-正式版本。
+候选报告写入本地忽略的 `reports/candidate_dma_batch/`，不会覆盖正式交付物
+或正式证据。候选通过报告门禁和实板回归后，再显式晋升为正式版本。
 
 ## Vitis 2019.2 与上板
 

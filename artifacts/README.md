@@ -13,5 +13,6 @@ SHA-256 以 `reports/dma_batch/release-hashes.sha256` 为准。当前值：
 ```
 
 `FPGA/rebuild_dma_batch.tcl` 的新输出进入被忽略的
-`artifacts/candidate_dma_batch/`。候选文件不得自动覆盖本目录的正式文件；
+`artifacts/candidate_dma_batch/`，对应报告进入
+`reports/candidate_dma_batch/`。候选文件不得自动覆盖本目录的正式文件；
 必须先通过报告门禁、软件构建和完整实板回归，再显式晋升。

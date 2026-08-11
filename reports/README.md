@@ -16,3 +16,6 @@
 
 临时渲染目录、旧日期报告、ILA/实验报告和候选串口日志不属于正式证据，已
 移入本地 `_local/archive/` 或由 `.gitignore` 排除。
+
+新的候选实现报告由 `FPGA/rebuild_dma_batch.tcl` 写入被忽略的
+`reports/candidate_dma_batch/`，不会覆盖本目录中的正式验收证据。

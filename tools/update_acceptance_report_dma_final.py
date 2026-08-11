@@ -1,5 +1,4 @@
 from pathlib import Path
-import sys
 
 from docx import Document
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
@@ -9,15 +8,14 @@ from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 
-ROOT = Path(r"D:\FPGA")
+ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "docs" / "templates" / "Z15_FPGA项目验收与测试报告.docx"
 DST = ROOT / "reports" / "Z15_FPGA项目验收与测试报告_20260811_DMA最终版.docx"
-TABLE_HELPERS = Path(
-    r"C:\Users\fortiutde\.codex\plugins\cache\openai-primary-runtime\documents"
-    r"\26.805.11740\skills\documents\scripts"
+from docx_table_geometry import (
+    apply_table_geometry,
+    column_widths_from_weights,
+    section_content_width_dxa,
 )
-sys.path.insert(0, str(TABLE_HELPERS))
-from table_geometry import apply_table_geometry, column_widths_from_weights, section_content_width_dxa
 
 
 GREEN = RGBColor(0x00, 0x78, 0x3E)

@@ -40,6 +40,7 @@ FPGA/FPGA.srcs/sources_1/bd/system/*_ooc.xdc
 artifacts/candidate_dma_batch/
 artifacts/experimental_failed/
 reports/experimental_failed/
+reports/candidate_dma_batch/
 reports/*_render*/
 
 # Keep only the reproducible IP configuration from generated IP source trees.
