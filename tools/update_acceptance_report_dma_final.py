@@ -10,7 +10,7 @@ from docx.shared import Pt, RGBColor
 
 
 ROOT = Path(r"D:\FPGA")
-SRC = ROOT / "reports" / "Z15_FPGA项目验收与测试报告.docx"
+SRC = ROOT / "docs" / "templates" / "Z15_FPGA项目验收与测试报告.docx"
 DST = ROOT / "reports" / "Z15_FPGA项目验收与测试报告_20260811_DMA最终版.docx"
 TABLE_HELPERS = Path(
     r"C:\Users\fortiutde\.codex\plugins\cache\openai-primary-runtime\documents"

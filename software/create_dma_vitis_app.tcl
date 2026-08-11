@@ -1,8 +1,7 @@
 set script_dir [file dirname [file normalize [info script]]]
 set root_dir [file normalize [file join $script_dir ..]]
 set workspace [file join $root_dir vitis_workspace]
-set default_xsa [file join $root_dir artifacts candidate_dma_batch \
-                 system_wrapper_dma_batch_nobit.xsa]
+set default_xsa [file join $root_dir artifacts system_wrapper_dma_batch.xsa]
 set source_dir [file join $script_dir baremetal src]
 set platform_name z15_dma_platform
 set app_name accelerator_dma_batch

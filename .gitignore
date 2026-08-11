@@ -36,6 +36,12 @@ FPGA/FPGA.srcs/sources_1/bd/system/ui/
 FPGA/FPGA.srcs/sources_1/bd/system/*.bxml
 FPGA/FPGA.srcs/sources_1/bd/system/*_ooc.xdc
 
+# Candidate and diagnostic products created by rebuild/report scripts
+artifacts/candidate_dma_batch/
+artifacts/experimental_failed/
+reports/experimental_failed/
+reports/*_render*/
+
 # Keep only the reproducible IP configuration from generated IP source trees.
 FPGA/FPGA.srcs/sources_1/ip/*/*
 !FPGA/FPGA.srcs/sources_1/ip/*/*.xci

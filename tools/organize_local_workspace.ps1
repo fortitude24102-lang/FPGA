@@ -96,6 +96,7 @@ $fixedItems = @(
     '.docx_review_fgpa1',
     'backup_before_codex_20260723_112014',
     'component.xml',
+    'constraints/z15_board_pins.xdc',
     'xgui',
     'FPGA/add_axi_debug_ila.tcl',
     'FPGA/apply_admet_timing_fix.tcl',
@@ -159,7 +160,12 @@ $fixedItems = @(
     'reports/experimental_failed',
     'reports/performance_measured_20260809.md',
     'reports/project_status_20260809.md',
-    'tools/inspect_challenge_pdf.py'
+    'software/baremetal/src/main.c',
+    'software/create_vitis_workspace.tcl',
+    'tools/create_acceptance_report.py',
+    'tools/inspect_challenge_pdf.py',
+    'tools/render_docx_with_word.ps1',
+    'tools/update_acceptance_report_final.py'
 )
 foreach ($item in $fixedItems) {
     [void]$archiveItems.Add($item)
