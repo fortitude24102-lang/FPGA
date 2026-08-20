@@ -174,6 +174,44 @@ void accel_configure_reference_admet_weights(void)
     }
 }
 
+static void accel_set_packed_weight(u32 words[ACCEL_REFERENCE_WEIGHT_WORDS],
+                                    u32 halfword_index, s16 value)
+{
+    u32 word_index = halfword_index >> 1;
+    u32 packed = (u32)(u16)value;
+
+    if ((halfword_index & 1U) == 0U) {
+        words[word_index] = (words[word_index] & 0xFFFF0000U) | packed;
+    } else {
+        words[word_index] = (words[word_index] & 0x0000FFFFU) |
+                            (packed << 16);
+    }
+}
+
+void accel_pack_reference_weights(u32 words[ACCEL_REFERENCE_WEIGHT_WORDS])
+{
+    const u32 gnn_values = ACCEL_GNN_WEIGHT_COUNT;
+    const u32 admet_values_per_model = 221U;
+    const u32 admet_layer2_offset = 210U;
+    u32 model;
+    u32 index;
+
+    if (words == 0) {
+        return;
+    }
+    for (index = 0U; index < ACCEL_REFERENCE_WEIGHT_WORDS; ++index) {
+        words[index] = 0U;
+    }
+
+    accel_set_packed_weight(words, 0U, (s16)0x0100);
+    for (model = 0U; model < 4U; ++model) {
+        u32 model_base = gnn_values + model * admet_values_per_model;
+        accel_set_packed_weight(words, model_base, (s16)0x0100);
+        accel_set_packed_weight(words, model_base + admet_layer2_offset,
+                                (s16)0x0100);
+    }
+}
+
 accel_result_t accel_tanimoto_self_test(void)
 {
     u32 query[ACCEL_FINGERPRINT_WORDS];

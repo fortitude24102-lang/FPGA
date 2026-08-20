@@ -38,6 +38,7 @@ FPGA/FPGA.srcs/sources_1/bd/system/*_ooc.xdc
 
 # Candidate and diagnostic products created by rebuild/report scripts
 artifacts/candidate_dma_batch/
+artifacts/system_wrapper_tcp_service.*
 artifacts/experimental_failed/
 reports/experimental_failed/
 reports/candidate_dma_batch/

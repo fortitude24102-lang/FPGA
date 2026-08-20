@@ -34,6 +34,39 @@ foreach source_file $app_sources {
 }
 
 setws $workspace
+
+# Vitis 2019.2 ships lwIP 2.0.2 but hides it from new BSPs because its MLD is
+# marked deprecated.  Build a local, generated repository overlay from that
+# exact bundled package; only the visibility marker is removed.
+if {![info exists ::env(XILINX_VITIS)] || $::env(XILINX_VITIS) eq ""} {
+    error "XILINX_VITIS is not set"
+}
+set bundled_lwip202 [file join $::env(XILINX_VITIS) data embeddedsw \
+    ThirdParty sw_services lwip202_v1_1]
+if {![file exists [file join $bundled_lwip202 data lwip202.mld]]} {
+    error "Bundled Vitis 2019.2 lwip202_v1_1 was not found"
+}
+set overlay_repo [file join $workspace _lwip202_repo]
+set overlay_parent [file join $overlay_repo ThirdParty sw_services]
+set overlay_lwip202 [file join $overlay_parent lwip202_v1_1]
+file delete -force $overlay_lwip202
+file mkdir $overlay_parent
+file copy -force $bundled_lwip202 $overlay_parent
+set overlay_mld [file join $overlay_lwip202 data lwip202.mld]
+set input [open $overlay_mld r]
+set mld_text [read $input]
+close $input
+set filtered_lines {}
+foreach line [split $mld_text "\n"] {
+    if {[string first "OPTION library_state" $line] < 0} {
+        lappend filtered_lines $line
+    }
+}
+set output [open $overlay_mld w]
+puts -nonewline $output [join $filtered_lines "\n"]
+close $output
+repo -set $overlay_repo
+repo -scan
 if {[lsearch -exact [platform list] $platform_name] < 0} {
     platform create -name $platform_name -hw $hardware_xsa \
         -proc $processor_name -os standalone -no-boot-bsp
@@ -46,7 +79,8 @@ platform active $platform_name
 platform generate
 domain active $domain_name
 
-if {[string first "lwip202" [bsp getlibs]] < 0} {
+if {[catch {bsp getlibs} bsp_libraries] ||
+    [string first "lwip202" $bsp_libraries] < 0} {
     bsp setlib -name lwip202
 }
 bsp config api_mode RAW_API

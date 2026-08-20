@@ -37,6 +37,7 @@
 #define ACCEL_FEATURE_WORDS     1600U
 #define ACCEL_GNN_OUTPUT_WORDS  3200U
 #define ACCEL_GNN_WEIGHT_COUNT  8192U
+#define ACCEL_REFERENCE_WEIGHT_WORDS 4538U
 
 typedef enum {
     ACCEL_TASK_TANIMOTO = 0,
@@ -74,6 +75,8 @@ u32 accel_read_gnn_output_word(u32 index);
 /* Deterministic Q8.8 weights used by both legacy and DMA acceptance tests. */
 void accel_configure_reference_gnn_weights(void);
 void accel_configure_reference_admet_weights(void);
+void accel_pack_reference_weights(
+    u32 words[ACCEL_REFERENCE_WEIGHT_WORDS]);
 
 accel_result_t accel_tanimoto_self_test(void);
 
