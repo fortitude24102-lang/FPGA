@@ -324,6 +324,27 @@ module tb_dma_task_queue_frontend_errors;
         expect_case("result overflow", 1, OK, RESULT_OVERFLOW, OK);
 
         reset_case();
+        fill_batch_header(32'h4D4F4C51, 32'h00080001, 1, 4553, 0, 0);
+        fill_task(32'h000000FE, 4537, 1, 1);
+        send_words(16, 1, 0);
+        expect_case("reload bad payload length", 1, OK, BAD_LENGTH,
+                    STREAM_TRUNCATED);
+
+        reset_case();
+        fill_batch_header(32'h4D4F4C51, 32'h00080001, 1, 4554, 0, 0);
+        fill_task(32'h000001FE, 4538, 1, 1);
+        send_words(16, 1, 0);
+        expect_case("reload bad flags", 1, OK, BAD_FLAGS,
+                    STREAM_TRUNCATED);
+
+        reset_case();
+        fill_batch_header(32'h4D4F4C51, 32'h00080001, 1, 4554, 0, 0);
+        fill_task(32'h000000FE, 4538, 1, 2);
+        send_words(16, 1, 0);
+        expect_case("reload bad item count", 1, OK, BAD_ITEM_COUNT,
+                    STREAM_TRUNCATED);
+
+        reset_case();
         fill_batch_header(32'h4D4F4C51, 32'h00080001, 1, 80, 0, 0);
         fill_task(32'd0, 64, 1, 1);
         send_words(16, 1, 0);

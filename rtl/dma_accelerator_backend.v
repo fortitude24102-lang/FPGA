@@ -80,13 +80,24 @@ module dma_accelerator_backend #(
     input  wire gnn_busy,
     input  wire gnn_valid,
 
+    output reg         gnn_weight_we,
+    output reg [(((FEATURE_DIM*HIDDEN_DIM) <= 1) ? 1 :
+                 $clog2(FEATURE_DIM*HIDDEN_DIM))-1:0] gnn_weight_addr,
+    output reg [15:0]  gnn_weight_wdata,
+
     output wire admet_start,
     output reg  descriptor_we,
     output reg  [4:0] descriptor_addr,
     output reg  [DATA_WIDTH-1:0] descriptor_wdata,
     input  wire admet_busy,
     input  wire admet_valid,
-    input  wire [4*DATA_WIDTH-1:0] admet_predictions
+    input  wire [4*DATA_WIDTH-1:0] admet_predictions,
+
+    output reg         admet_cfg_we,
+    output reg [1:0]   admet_cfg_model,
+    output reg [1:0]   admet_cfg_layer,
+    output reg [15:0]  admet_cfg_addr,
+    output reg [15:0]  admet_cfg_wdata
 );
     localparam integer GNN_FEATURE_WORDS = (MAX_NODES*FEATURE_DIM+1)/2;
     localparam integer GNN_ADJ_WORDS = (MAX_NODES*MAX_NODES+31)/32;
@@ -111,6 +122,8 @@ module dma_accelerator_backend #(
     localparam [3:0] ST_RESULT        = 4'd10;
     localparam [3:0] ST_GNN_READ_WAIT = 4'd11;
     localparam [3:0] ST_START_TANI    = 4'd12;
+    localparam [3:0] ST_RELOAD_LOW    = 4'd13;
+    localparam [3:0] ST_RELOAD_HIGH   = 4'd14;
 
     reg [3:0] state;
     reg [7:0] active_task;
@@ -123,6 +136,13 @@ module dma_accelerator_backend #(
     reg [31:0] result_data_reg;
     reg result_valid_reg;
     reg [1:0] gnn_read_wait;
+    reg [31:0] reload_word;
+    reg reload_word_last;
+    reg [13:0] reload_weight_index;
+    reg [31:0] reload_epoch;
+    reg [1:0] reload_admet_model;
+    reg [1:0] reload_admet_layer;
+    reg [7:0] reload_admet_addr;
 
     reg [31:0] tanimoto_result;
 
@@ -176,6 +196,63 @@ module dma_accelerator_backend #(
     assign gnn_output_re = gnn_output_re_reg;
     assign gnn_output_addr = gnn_output_addr_reg;
     assign admet_start = admet_start_reg;
+
+    task advance_reload_address;
+        begin
+            reload_weight_index <= reload_weight_index + 1'b1;
+            if (reload_weight_index >= 14'd8192) begin
+                case (reload_admet_layer)
+                    2'd0: begin
+                        if (reload_admet_addr == 8'd199) begin
+                            reload_admet_layer <= 2'd1;
+                            reload_admet_addr <= 8'd0;
+                        end else begin
+                            reload_admet_addr <= reload_admet_addr + 1'b1;
+                        end
+                    end
+                    2'd1: begin
+                        if (reload_admet_addr == 8'd9) begin
+                            reload_admet_layer <= 2'd2;
+                            reload_admet_addr <= 8'd0;
+                        end else begin
+                            reload_admet_addr <= reload_admet_addr + 1'b1;
+                        end
+                    end
+                    2'd2: begin
+                        if (reload_admet_addr == 8'd9) begin
+                            reload_admet_layer <= 2'd3;
+                            reload_admet_addr <= 8'd0;
+                        end else begin
+                            reload_admet_addr <= reload_admet_addr + 1'b1;
+                        end
+                    end
+                    default: begin
+                        reload_admet_model <= reload_admet_model + 1'b1;
+                        reload_admet_layer <= 2'd0;
+                        reload_admet_addr <= 8'd0;
+                    end
+                endcase
+            end
+        end
+    endtask
+
+    task emit_reload_weight;
+        input [15:0] value;
+        begin
+            if (reload_weight_index < 14'd8192) begin
+                gnn_weight_we <= 1'b1;
+                gnn_weight_addr <= reload_weight_index[12:0];
+                gnn_weight_wdata <= value;
+            end else begin
+                admet_cfg_we <= 1'b1;
+                admet_cfg_model <= reload_admet_model;
+                admet_cfg_layer <= reload_admet_layer;
+                admet_cfg_addr <= {8'd0, reload_admet_addr};
+                admet_cfg_wdata <= value;
+            end
+            advance_reload_address();
+        end
+    endtask
 
     function is_gnn_result_word;
         input [7:0] id;
@@ -273,6 +350,21 @@ module dma_accelerator_backend #(
             descriptor_addr <= 0;
             descriptor_wdata <= 0;
             shared_result_count <= 0;
+            reload_word <= 0;
+            reload_word_last <= 0;
+            reload_weight_index <= 0;
+            reload_epoch <= 0;
+            reload_admet_model <= 0;
+            reload_admet_layer <= 0;
+            reload_admet_addr <= 0;
+            gnn_weight_we <= 0;
+            gnn_weight_addr <= 0;
+            gnn_weight_wdata <= 0;
+            admet_cfg_we <= 0;
+            admet_cfg_model <= 0;
+            admet_cfg_layer <= 0;
+            admet_cfg_addr <= 0;
+            admet_cfg_wdata <= 0;
         end else begin
             tanimoto_start_reg <= 1'b0;
             gnn_start_reg <= 1'b0;
@@ -282,6 +374,8 @@ module dma_accelerator_backend #(
             gnn_output_re_reg <= 1'b0;
             fingerprint_we <= 1'b0;
             descriptor_we <= 1'b0;
+            gnn_weight_we <= 1'b0;
+            admet_cfg_we <= 1'b0;
 
             if (abort) begin
                 state <= ST_IDLE;
@@ -297,6 +391,10 @@ module dma_accelerator_backend #(
                             payload_index <= 0;
                             admet_item_index <= 0;
                             shared_result_count <= 0;
+                            reload_weight_index <= 0;
+                            reload_admet_model <= 0;
+                            reload_admet_layer <= 0;
+                            reload_admet_addr <= 0;
                             state <= ST_LOAD;
                         end
                     end
@@ -342,7 +440,7 @@ module dma_accelerator_backend #(
                                         state <= ST_WAIT_ADMET;
                                     end
                                 end
-                                default: begin
+                                `MOL_DMA_TASK_PIPELINE: begin
                                     if (payload_index < 64) begin
                                         fingerprint_we <= 1'b1;
                                         fingerprint_db_select <= (payload_index >= 32);
@@ -367,7 +465,29 @@ module dma_accelerator_backend #(
                                         state <= ST_START_TANI;
                                     end
                                 end
+                                `MOL_DMA_TASK_WEIGHT_RELOAD: begin
+                                    reload_word <= payload_data;
+                                    reload_word_last <= payload_last;
+                                    state <= ST_RELOAD_LOW;
+                                end
+                                default: state <= ST_IDLE;
                             endcase
+                        end
+                    end
+
+                    ST_RELOAD_LOW: begin
+                        emit_reload_weight(reload_word[15:0]);
+                        state <= ST_RELOAD_HIGH;
+                    end
+
+                    ST_RELOAD_HIGH: begin
+                        emit_reload_weight(reload_word[31:16]);
+                        if (reload_word_last) begin
+                            reload_epoch <= reload_epoch + 1'b1;
+                            result_words_reg <= 1;
+                            state <= ST_DONE;
+                        end else begin
+                            state <= ST_LOAD;
                         end
                     end
 
@@ -459,6 +579,9 @@ module dma_accelerator_backend #(
                                 if (active_task == `MOL_DMA_TASK_TANIMOTO &&
                                     !shared_mode)
                                     result_data_reg <= tanimoto_result;
+                                else if (active_task ==
+                                         `MOL_DMA_TASK_WEIGHT_RELOAD)
+                                    result_data_reg <= reload_epoch;
                                 else if (active_task == `MOL_DMA_TASK_PIPELINE &&
                                          (full_gnn || return_intermediate) &&
                                          result_index == 0)

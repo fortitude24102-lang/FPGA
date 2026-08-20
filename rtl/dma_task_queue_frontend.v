@@ -129,7 +129,8 @@ module dma_task_queue_frontend (
             required_result = 32'd0;
             allowed_flags = 32'd0;
 
-            if (id > `MOL_DMA_TASK_PIPELINE) begin
+            if (!((id <= `MOL_DMA_TASK_PIPELINE) ||
+                  (id == `MOL_DMA_TASK_WEIGHT_RELOAD))) begin
                 checked_task_status = `MOL_DMA_STATUS_BAD_TASK;
             end else if ((flags & ~32'h00000700) != 0 || reserved != 0) begin
                 checked_task_status = `MOL_DMA_STATUS_BAD_FLAGS;
@@ -165,7 +166,7 @@ module dma_task_queue_frontend (
                                            (item_count_value << 2);
                         required_result = item_count_value << 2;
                     end
-                    default: begin
+                    `MOL_DMA_TASK_PIPELINE: begin
                         allowed_flags = `MOL_DMA_FLAG_FULL_GNN_OUTPUT |
                                         `MOL_DMA_FLAG_RETURN_INTERMEDIATE;
                         if (item_count_value != 1)
@@ -178,6 +179,14 @@ module dma_task_queue_frontend (
                         else
                             required_result = 32'd4;
                     end
+                    `MOL_DMA_TASK_WEIGHT_RELOAD: begin
+                        allowed_flags = 32'd0;
+                        if (item_count_value != 1)
+                            checked_task_status = `MOL_DMA_STATUS_BAD_ITEM_COUNT;
+                        required_payload = `MOL_DMA_PAYLOAD_WORDS_WEIGHT_RELOAD;
+                        required_result = 32'd1;
+                    end
+                    default: checked_task_status = `MOL_DMA_STATUS_BAD_TASK;
                 endcase
 
                 if ((checked_task_status == `MOL_DMA_STATUS_OK) &&

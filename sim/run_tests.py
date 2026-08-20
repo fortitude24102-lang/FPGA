@@ -189,6 +189,10 @@ TESTS = {
             SIM / "tb_dma_backend_shared_overlap.sv",
         ],
     ),
+    "dma_weight_reload": (
+        "tb_dma_weight_reload",
+        [RTL / "dma_accelerator_backend.v", SIM / "tb_dma_weight_reload.sv"],
+    ),
     "pipeline_latency": (
         "tb_pipeline_latency",
         [

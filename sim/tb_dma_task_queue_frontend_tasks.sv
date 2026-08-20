@@ -54,7 +54,7 @@ module tb_dma_task_queue_frontend_tasks;
         .batch_observed_words(batch_observed_words)
     );
 
-    reg [31:0] words [0:1799];
+    reg [31:0] words [0:4599];
     integer i, b, cycle_count;
     integer batch_events, task_events, payload_events, end_events;
     reg [7:0] seen_task_id, seen_task_status, seen_batch_status, seen_end_status;
@@ -119,7 +119,7 @@ module tb_dma_task_queue_frontend_tasks;
             s_valid = 0;
             s_last = 0;
             repeat (4) @(negedge clk);
-            for (i = 0; i < 1800; i = i + 1)
+            for (i = 0; i < 4600; i = i + 1)
                 words[i] = 0;
             total_words = 16 + requested_payload_words;
             words[0] = 32'h4D4F4C51;
@@ -185,6 +185,7 @@ module tb_dma_task_queue_frontend_tasks;
         run_valid_task(1, 32'h00000000, 1679, 1, 1, "GNN summary");
         run_valid_task(2, 32'h00000000, 60, 12, 3, "ADMET three items");
         run_valid_task(3, 32'h00000200, 1763, 6, 1, "Pipeline intermediate");
+        run_valid_task(8'hFE, 32'h00000000, 4538, 1, 1, "Weight reload");
         $display("ALL DMA FRONTEND TASK SHAPE TESTS PASSED");
         $finish;
     end

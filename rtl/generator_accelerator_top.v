@@ -388,10 +388,18 @@ module generator_accelerator_top #(
     wire [3:0] dma_gnn_adjacency_wstrb;
     wire dma_gnn_output_re;
     wire [GNN_OUTPUT_ADDR_W-1:0] dma_gnn_output_addr;
+    wire dma_gnn_weight_we;
+    wire [GNN_WEIGHT_ADDR_W-1:0] dma_gnn_weight_addr;
+    wire [DATA_WIDTH-1:0] dma_gnn_weight_wdata;
     wire dma_admet_start;
     wire dma_descriptor_we;
     wire [4:0] dma_descriptor_addr;
     wire [DATA_WIDTH-1:0] dma_descriptor_wdata;
+    wire dma_admet_cfg_we;
+    wire [1:0] dma_admet_cfg_model;
+    wire [1:0] dma_admet_cfg_layer;
+    wire [15:0] dma_admet_cfg_addr;
+    wire [DATA_WIDTH-1:0] dma_admet_cfg_wdata;
 
     wire core_tanimoto_start = dma_active ? dma_tanimoto_start : tanimoto_start;
     wire core_gnn_start = dma_active ? dma_gnn_start : gnn_start;
@@ -414,6 +422,20 @@ module generator_accelerator_top #(
     wire [GNN_OUTPUT_ADDR_W-1:0] core_gnn_output_addr =
         dma_active ? dma_gnn_output_addr : gnn_output_addr;
     wire core_admet_start = dma_active ? dma_admet_start : admet_start;
+    wire core_gnn_weight_we = dma_active ? dma_gnn_weight_we : gnn_weight_we;
+    wire [GNN_WEIGHT_ADDR_W-1:0] core_gnn_weight_addr =
+        dma_active ? dma_gnn_weight_addr : gnn_weight_addr;
+    wire [DATA_WIDTH-1:0] core_gnn_weight_wdata =
+        dma_active ? dma_gnn_weight_wdata : gnn_weight_data_reg;
+    wire core_admet_cfg_we = dma_active ? dma_admet_cfg_we : admet_cfg_we;
+    wire [1:0] core_admet_cfg_model =
+        dma_active ? dma_admet_cfg_model : admet_cfg_model;
+    wire [1:0] core_admet_cfg_layer =
+        dma_active ? dma_admet_cfg_layer : admet_cfg_layer;
+    wire [15:0] core_admet_cfg_addr =
+        dma_active ? dma_admet_cfg_addr : admet_cfg_addr;
+    wire [DATA_WIDTH-1:0] core_admet_cfg_wdata =
+        dma_active ? dma_admet_cfg_wdata : admet_weight_data_reg;
 
     tanimoto_accelerator u_tanimoto (
         .clk(s_axi_aclk),
@@ -450,9 +472,9 @@ module generator_accelerator_top #(
         .output_re(core_gnn_output_re),
         .output_word_addr(core_gnn_output_addr),
         .output_rdata(gnn_output_rdata),
-        .weight_we(gnn_weight_we),
-        .weight_addr(gnn_weight_addr),
-        .weight_wdata(gnn_weight_data_reg),
+        .weight_we(core_gnn_weight_we),
+        .weight_addr(core_gnn_weight_addr),
+        .weight_wdata(core_gnn_weight_wdata),
         .busy(gnn_busy),
         .valid(gnn_valid)
     );
@@ -466,11 +488,11 @@ module generator_accelerator_top #(
         .rst_n(s_axi_aresetn),
         .start(core_admet_start),
         .descriptors(descriptor_buffer),
-        .cfg_we(admet_cfg_we),
-        .cfg_model(admet_cfg_model),
-        .cfg_layer(admet_cfg_layer),
-        .cfg_addr(admet_cfg_addr),
-        .cfg_wdata(admet_weight_data_reg),
+        .cfg_we(core_admet_cfg_we),
+        .cfg_model(core_admet_cfg_model),
+        .cfg_layer(core_admet_cfg_layer),
+        .cfg_addr(core_admet_cfg_addr),
+        .cfg_wdata(core_admet_cfg_wdata),
         .busy(admet_busy),
         .valid(admet_valid),
         .logp(logp),
@@ -759,12 +781,21 @@ module generator_accelerator_top #(
         .gnn_output_re(dma_gnn_output_re),
         .gnn_output_addr(dma_gnn_output_addr),
         .gnn_output_rdata(gnn_output_rdata), .gnn_busy(gnn_busy),
-        .gnn_valid(gnn_valid), .admet_start(dma_admet_start),
+        .gnn_valid(gnn_valid),
+        .gnn_weight_we(dma_gnn_weight_we),
+        .gnn_weight_addr(dma_gnn_weight_addr),
+        .gnn_weight_wdata(dma_gnn_weight_wdata),
+        .admet_start(dma_admet_start),
         .descriptor_we(dma_descriptor_we),
         .descriptor_addr(dma_descriptor_addr),
         .descriptor_wdata(dma_descriptor_wdata),
         .admet_busy(admet_busy), .admet_valid(admet_valid),
-        .admet_predictions(admet_predictions)
+        .admet_predictions(admet_predictions),
+        .admet_cfg_we(dma_admet_cfg_we),
+        .admet_cfg_model(dma_admet_cfg_model),
+        .admet_cfg_layer(dma_admet_cfg_layer),
+        .admet_cfg_addr(dma_admet_cfg_addr),
+        .admet_cfg_wdata(dma_admet_cfg_wdata)
     );
 
     always @(posedge s_axi_aclk or negedge s_axi_aresetn) begin
