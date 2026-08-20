@@ -61,6 +61,11 @@ set_property -dict [list \
     CONFIG.PCW_EN_RST1_PORT {1} \
     CONFIG.PCW_USE_FABRIC_INTERRUPT {1} \
     CONFIG.PCW_IRQ_F2P_INTR {1} \
+    CONFIG.PCW_ENET0_PERIPHERAL_ENABLE {1} \
+    CONFIG.PCW_ENET0_ENET0_IO {MIO 16 .. 27} \
+    CONFIG.PCW_ENET0_GRP_MDIO_ENABLE {1} \
+    CONFIG.PCW_ENET0_GRP_MDIO_IO {MIO 52 .. 53} \
+    CONFIG.PCW_PRESET_BANK1_VOLTAGE {LVCMOS 1.8V} \
 ] [get_bd_cells $ps]
 
 set dma_bridge [create_bd_cell -type ip \
