@@ -122,13 +122,13 @@ TCP 是字节流，接收器必须同时处理拆包、粘包和零长度/异常
 - Pipeline：4 个结果字。
 - Weight reload：1 个 epoch 结果字。
 
-错误响应设置 error；FIFO 已满或连接已有未完成请求时设置 busy。错误 payload 为两个 u32：稳定错误码和可选细节值，客户端不需要解析 UART 文本。
+错误响应设置 error；FIFO 已满时设置 busy。错误 payload 为两个 u32：稳定错误码和可选细节值，客户端不需要解析 UART 文本。
 
 ## 6. 8 项 FIFO 与连接管理
 
 FIFO 固定为 8 项，严格先进先出。每项使用 24 KiB 静态空间，可容纳最大的 18,152-byte 权重帧；总存储 192 KiB，放在 DDR，不使用堆分配。
 
-服务器最多维护 5 个 TCP 连接。每个连接只允许一个已入队/执行中的请求；在完成前继续提交将立即得到 busy。队列项保存连接槽编号和 generation，而不是长期保存裸 `tcp_pcb*`，从而避免客户端断开后引用失效。
+服务器最多维护 5 个 TCP 连接。一个连接可以连续提交多个完整帧；所有连接的请求进入同一个 8 项 FIFO，因此同一连接和跨连接响应都遵循全局入队顺序。队列项保存连接槽编号和 generation，而不是长期保存裸 `tcp_pcb*`，从而避免客户端断开后引用失效。只有 FIFO 已满时才立即返回 busy。
 
 主循环每轮依次执行：
 
@@ -153,7 +153,7 @@ Vitis 2019.2 lwIP 对未知 RGMII PHY 默认走 Marvell 初始化，不能直接
 
 ## 8. 错误处理
 
-至少定义并测试以下错误：坏 magic、坏 version、保留 flags 非零、未知 task、payload 长度错误、batch 越界、FIFO 满、连接忙、weights not ready、reload failed、DMA timeout、DMA IRQ error、TCP send failure。
+至少定义并测试以下错误：坏 magic、坏 version、保留 flags 非零、未知 task、payload 长度错误、batch 越界、FIFO 满、weights not ready、reload failed、DMA timeout、DMA IRQ error、TCP send failure。
 
 协议错误只影响当前帧；无法确定下一帧边界的连接直接关闭。DMA 错误执行通道复位；权重装载错误额外清除 ready。所有等待都有上限，不允许网络或加速器永久阻塞主循环。
 
