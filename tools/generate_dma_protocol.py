@@ -86,8 +86,9 @@ def validate_spec(spec: Mapping[str, object], constants: list[tuple[str, int, bo
     task_ids = spec["task_ids"]
     statuses = spec["statuses"]
     assert isinstance(task_ids, Mapping) and isinstance(statuses, Mapping)
-    if sorted(parse_integer(value) for value in task_ids.values()) != [0, 1, 2, 3]:
-        raise ValueError("task IDs must be the contiguous range 0..3")
+    task_values = {parse_integer(value) for value in task_ids.values()}
+    if task_values != {0, 1, 2, 3, 0xFE}:
+        raise ValueError("task IDs must be 0..3 plus weight reload 0xFE")
     if sorted(parse_integer(value) for value in statuses.values()) != list(range(12)):
         raise ValueError("status codes must be the contiguous range 0..11")
 
@@ -172,7 +173,8 @@ def update_or_check(path: Path, expected: str, check: bool) -> bool:
             return False
         return True
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(expected, encoding="utf-8", newline="\n")
+    with path.open("w", encoding="utf-8", newline="\n") as output:
+        output.write(expected)
     print(f"generated: {path}")
     return True
 

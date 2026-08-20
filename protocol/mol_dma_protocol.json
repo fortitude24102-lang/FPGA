@@ -26,7 +26,8 @@
     "tanimoto": 0,
     "gnn": 1,
     "admet": 2,
-    "pipeline": 3
+    "pipeline": 3,
+    "weight_reload": 254
   },
   "task_flags": {
     "full_gnn_output": 256,
@@ -56,7 +57,8 @@
     "admet_per_item": 20,
     "pipeline_total": 1763,
     "gnn_full_result": 3200,
-    "admet_results_per_item": 4
+    "admet_results_per_item": 4,
+    "weight_reload": 4538
   },
   "field_offsets": {
     "batch": {

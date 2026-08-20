@@ -28,6 +28,7 @@ TANIMOTO = 0
 GNN = 1
 ADMET = 2
 PIPELINE = 3
+WEIGHT_RELOAD = 0xFE
 FULL_GNN = 0x100
 INTERMEDIATE = 0x200
 SHARED_QUERY = 0x400
@@ -91,6 +92,10 @@ def task_requirements(task_id: int, flags: int, count: int) -> tuple[int, int]:
         return 1679, (3200 if flags & FULL_GNN else 1)
     if task_id == ADMET:
         return 20 * count, 4 * count
+    if task_id == WEIGHT_RELOAD:
+        if flags != 0 or count != 1:
+            raise ValueError("invalid reload request")
+        return 4538, 1
     if flags & FULL_GNN:
         return 1763, 3205
     if flags & INTERMEDIATE:
@@ -205,6 +210,7 @@ class MolDmaLayoutTests(unittest.TestCase):
             (GNN, 0, 1),
             (ADMET, 0, 4),
             (PIPELINE, INTERMEDIATE, 1),
+            (WEIGHT_RELOAD, 0, 1),
         ]:
             with self.subTest(task=task_id):
                 raw, address, builder = self.new_builder(batch_id=0x10203040)
@@ -256,6 +262,32 @@ class MolDmaLayoutTests(unittest.TestCase):
         )
         self.assertEqual(rc, ERR_RANGE)
         self.assertEqual(builder.used_words, before)
+        self.assertIsNotNone(raw)
+
+    def test_result_parser_accepts_weight_reload_success(self) -> None:
+        total_words = 8 + 8 + 1 + 8
+        frame_words = [
+            MOLR, VERSION_HEADER, 0xFEED0001, 1, 0, total_words, 0, 0,
+            9, WEIGHT_RELOAD, 1, 100, 0, 1, 0xCAFE, 0, 7,
+            MOLE, 0xFEED0001, 1, 0, total_words, 0, 0xFFFFFFFF, 0,
+        ]
+        frame = struct.pack(f"<{len(frame_words)}I", *frame_words)
+        raw, address = aligned_buffer(len(frame))
+        ctypes.memmove(address, frame, len(frame))
+        iterator = ResultIterator()
+        self.assertEqual(
+            self.lib.mol_dma_results_open(
+                ctypes.byref(iterator), address, len(frame), 0xFEED0001
+            ),
+            OK,
+        )
+        view = ResultView()
+        self.assertEqual(
+            self.lib.mol_dma_results_next(ctypes.byref(iterator), ctypes.byref(view)),
+            1,
+        )
+        self.assertEqual((view.task_id, view.result_words), (WEIGHT_RELOAD, 1))
+        self.assertEqual(ctypes.c_uint32.from_address(view.payload).value, 7)
         self.assertIsNotNone(raw)
 
     def test_64_mixed_tasks(self) -> None:

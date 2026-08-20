@@ -93,6 +93,13 @@ int mol_dma_required_words(uint32_t task_id, uint32_t flags,
             result = 4U;
         }
         break;
+    case MOL_DMA_TASK_WEIGHT_RELOAD:
+        if (flags != 0U || item_count != 1U) {
+            return MOL_DMA_ERR_ARGUMENT;
+        }
+        payload = MOL_DMA_PAYLOAD_WORDS_WEIGHT_RELOAD;
+        result = 1U;
+        break;
     default:
         return MOL_DMA_ERR_ARGUMENT;
     }
@@ -277,6 +284,8 @@ static int valid_success_result_size(uint32_t task_id, uint32_t item_count,
         return item_count == 1U &&
                (result_words == 4U || result_words == 6U ||
                 result_words == 3205U);
+    case MOL_DMA_TASK_WEIGHT_RELOAD:
+        return item_count == 1U && result_words == 1U;
     default:
         return 0;
     }
@@ -364,8 +373,7 @@ int mol_dma_results_open(mol_dma_result_iterator_t *iterator,
                             result_words, &record_end) != MOL_DMA_OK ||
             record_end > trailer_word ||
             ((status == MOL_DMA_STATUS_OK) ?
-             (task_id > MOL_DMA_TASK_PIPELINE ||
-              !valid_success_result_size(task_id, item_count, result_words)) :
+             !valid_success_result_size(task_id, item_count, result_words) :
              (result_words != 0U))) {
             return MOL_DMA_ERR_FORMAT;
         }
