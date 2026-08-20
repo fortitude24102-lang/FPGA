@@ -23,6 +23,19 @@ typedef enum {
 } mol_dma_rc_t;
 
 typedef struct {
+    volatile uint32_t mm2s_done;
+    volatile uint32_t s2mm_done;
+    volatile uint32_t error;
+} mol_dma_irq_state_t;
+
+#define MOL_DMA_IRQ_IOC   UINT32_C(1)
+#define MOL_DMA_IRQ_ERROR UINT32_C(2)
+
+void mol_dma_irq_record(mol_dma_irq_state_t *state, uint32_t direction,
+                        uint32_t irq_status);
+int mol_dma_irq_complete(const mol_dma_irq_state_t *state);
+
+typedef struct {
     uint8_t *buffer;
     size_t capacity_bytes;
     uint32_t used_words;
@@ -91,10 +104,23 @@ int mol_dma_find_response_bytes(const void *buffer, size_t capacity_bytes,
 
 #ifndef MOL_DMA_HOST_TEST
 #include "xaxidma.h"
+#include "xscugic.h"
+
+typedef void (*mol_dma_progress_fn)(void *context);
+
+#define MOL_DMA_WAIT_MM2S UINT32_C(1)
+#define MOL_DMA_WAIT_S2MM UINT32_C(2)
 
 typedef struct {
     XAxiDma instance;
+    XScuGic interrupt_controller;
+    mol_dma_irq_state_t irq_state;
     uint32_t initialized;
+    uint32_t irqs_connected;
+    uint32_t mm2s_irq_id;
+    uint32_t s2mm_irq_id;
+    uint32_t mm2s_irq_count;
+    uint32_t s2mm_irq_count;
     uint32_t last_mm2s_status;
     uint32_t last_s2mm_status;
     uint64_t last_tx_flush_ticks;
@@ -108,6 +134,23 @@ int mol_dma_device_init(mol_dma_device_t *device, uint16_t device_id,
                         uint32_t reset_poll_limit);
 int mol_dma_device_reset(mol_dma_device_t *device,
                          uint32_t reset_poll_limit);
+int mol_dma_device_connect_irqs(mol_dma_device_t *device,
+                                uint32_t mm2s_irq_id,
+                                uint32_t s2mm_irq_id);
+int mol_dma_device_prepare_irqs(mol_dma_device_t *device);
+int mol_dma_device_wait_irqs(mol_dma_device_t *device,
+                             uint32_t required_events,
+                             uint64_t timeout_ticks,
+                             mol_dma_progress_fn progress,
+                             void *context);
+int mol_dma_transfer_irq_ex(mol_dma_device_t *device,
+                            const void *tx_buffer, size_t tx_bytes,
+                            void *rx_buffer, size_t rx_capacity_bytes,
+                            uint32_t expected_batch_id,
+                            uint64_t timeout_ticks,
+                            mol_dma_progress_fn progress, void *context,
+                            size_t *response_bytes,
+                            uint32_t transfer_flags);
 int mol_dma_transfer_poll(mol_dma_device_t *device,
                           const void *tx_buffer, size_t tx_bytes,
                           void *rx_buffer, size_t rx_capacity_bytes,

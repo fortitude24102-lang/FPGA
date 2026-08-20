@@ -10,8 +10,8 @@
 #include "xtime_l.h"
 
 #define DMA_BUFFER_BYTES       MOL_DMA_MAX_TRANSFER_BYTES
-#define DMA_POLL_LIMIT           5000000U
 #define DMA_RESET_POLL_LIMIT   1000000U
+#define DMA_TIMEOUT_TICKS       ((u64)COUNTS_PER_SECOND)
 #define ACCEL_POLL_LIMIT       20000000U
 #define STRESS_BATCHES         1000U
 #define PAYLOAD_SCRATCH_WORDS  (32U + 64U * 32U)
@@ -80,33 +80,6 @@ static u32 ticks_to_us(u64 ticks)
     return (u32)((ticks * 1000000ULL) / (u64)COUNTS_PER_SECOND);
 }
 
-static u32 dma_status(int direction)
-{
-    UINTPTR offset = (direction == XAXIDMA_DEVICE_TO_DMA) ?
-                     XAXIDMA_RX_OFFSET : XAXIDMA_TX_OFFSET;
-    return XAxiDma_ReadReg(dma_device.instance.RegBase + offset,
-                           XAXIDMA_SR_OFFSET);
-}
-
-static int wait_dma_idle(int direction, u32 *final_status)
-{
-    u32 poll;
-    u32 status = 0U;
-    for (poll = 0U; poll < DMA_POLL_LIMIT; ++poll) {
-        status = dma_status(direction);
-        if ((status & XAXIDMA_ERR_ALL_MASK) != 0U) {
-            *final_status = status;
-            return MOL_DMA_ERR_HARDWARE;
-        }
-        if ((status & XAXIDMA_IDLE_MASK) != 0U) {
-            *final_status = status;
-            return MOL_DMA_OK;
-        }
-    }
-    *final_status = status;
-    return MOL_DMA_ERR_TIMEOUT;
-}
-
 static void print_bandwidth(const char *direction, u32 bytes, u32 us)
 {
     u32 mbps_x100 = (u32)(((u64)bytes * 100ULL) / (u64)us);
@@ -132,14 +105,18 @@ static int run_standalone_bandwidth(void)
     Xil_Out32((UINTPTR)ACCEL_BASEADDR + DMA_TEST_MODE_OFFSET,
               DMA_TEST_MM2S_SINK);
     XTime_GetTime(&start);
-    rc = XAxiDma_SimpleTransfer(&dma_device.instance, (UINTPTR)tx_buffer,
-                                bytes, XAXIDMA_DMA_TO_DEVICE);
+    rc = mol_dma_device_prepare_irqs(&dma_device);
     if (rc == XST_SUCCESS)
-        rc = wait_dma_idle(XAXIDMA_DMA_TO_DEVICE, &status);
+        rc = XAxiDma_SimpleTransfer(&dma_device.instance, (UINTPTR)tx_buffer,
+                                    bytes, XAXIDMA_DMA_TO_DEVICE);
+    if (rc == XST_SUCCESS)
+        rc = mol_dma_device_wait_irqs(&dma_device, MOL_DMA_WAIT_MM2S,
+                                      DMA_TIMEOUT_TICKS, NULL, NULL);
     XTime_GetTime(&end);
     Xil_Out32((UINTPTR)ACCEL_BASEADDR + DMA_TEST_MODE_OFFSET,
               DMA_TEST_NORMAL);
     if (rc != MOL_DMA_OK) {
+        status = dma_device.last_mm2s_status;
         xil_printf("FAIL: standalone MM2S rc=%d status=0x%08x\r\n",
                    rc, status);
         return 1;
@@ -148,8 +125,10 @@ static int run_standalone_bandwidth(void)
 
     Xil_DCacheFlushRange((UINTPTR)rx_buffer, bytes);
     Xil_Out32((UINTPTR)ACCEL_BASEADDR + DMA_TEST_BEATS_OFFSET, beats);
-    rc = XAxiDma_SimpleTransfer(&dma_device.instance, (UINTPTR)rx_buffer,
-                                bytes, XAXIDMA_DEVICE_TO_DMA);
+    rc = mol_dma_device_prepare_irqs(&dma_device);
+    if (rc == MOL_DMA_OK)
+        rc = XAxiDma_SimpleTransfer(&dma_device.instance, (UINTPTR)rx_buffer,
+                                    bytes, XAXIDMA_DEVICE_TO_DMA);
     if (rc != XST_SUCCESS) {
         xil_printf("FAIL: standalone S2MM arm rc=%d\r\n", rc);
         return 1;
@@ -157,11 +136,13 @@ static int run_standalone_bandwidth(void)
     XTime_GetTime(&start);
     Xil_Out32((UINTPTR)ACCEL_BASEADDR + DMA_TEST_MODE_OFFSET,
               DMA_TEST_S2MM_SOURCE);
-    rc = wait_dma_idle(XAXIDMA_DEVICE_TO_DMA, &status);
+    rc = mol_dma_device_wait_irqs(&dma_device, MOL_DMA_WAIT_S2MM,
+                                  DMA_TIMEOUT_TICKS, NULL, NULL);
     XTime_GetTime(&end);
     Xil_Out32((UINTPTR)ACCEL_BASEADDR + DMA_TEST_MODE_OFFSET,
               DMA_TEST_NORMAL);
     if (rc != MOL_DMA_OK) {
+        status = dma_device.last_s2mm_status;
         xil_printf("FAIL: standalone S2MM rc=%d status=0x%08x\r\n",
                    rc, status);
         return 1;
@@ -309,14 +290,16 @@ static int execute_batch(mol_dma_builder_t *builder, u32 batch_id,
 
     XTime_GetTime(&start);
     if (builder->buffer == tanimoto_tx_buffer) {
-        rc = mol_dma_transfer_poll_ex(
+        rc = mol_dma_transfer_irq_ex(
             &dma_device, builder->buffer, *tx_bytes,
             rx_buffer, rx_capacity_bytes, batch_id,
-            DMA_POLL_LIMIT, rx_bytes, MOL_DMA_TRANSFER_TX_UNCACHED);
+            DMA_TIMEOUT_TICKS, NULL, NULL, rx_bytes,
+            MOL_DMA_TRANSFER_TX_UNCACHED);
     } else {
-        rc = mol_dma_transfer_poll(&dma_device, builder->buffer, *tx_bytes,
-                                   rx_buffer, rx_capacity_bytes, batch_id,
-                                   DMA_POLL_LIMIT, rx_bytes);
+        rc = mol_dma_transfer_irq_ex(
+            &dma_device, builder->buffer, *tx_bytes,
+            rx_buffer, rx_capacity_bytes, batch_id,
+            DMA_TIMEOUT_TICKS, NULL, NULL, rx_bytes, 0U);
     }
     XTime_GetTime(&end);
     *transfer_us = elapsed_us(start, end);
@@ -869,6 +852,20 @@ int main(void)
         cleanup_platform();
         return 1;
     }
+    rc = mol_dma_device_connect_irqs(
+        &dma_device,
+        XPAR_FABRIC_AXI_DMA_0_MM2S_INTROUT_INTR,
+        XPAR_FABRIC_AXI_DMA_0_S2MM_INTROUT_INTR);
+    if (rc != MOL_DMA_OK) {
+        xil_printf("FAIL: AXI DMA interrupt init rc=%d mm2s=%u s2mm=%u\r\n",
+                   rc, (u32)XPAR_FABRIC_AXI_DMA_0_MM2S_INTROUT_INTR,
+                   (u32)XPAR_FABRIC_AXI_DMA_0_S2MM_INTROUT_INTR);
+        cleanup_platform();
+        return 1;
+    }
+    xil_printf("INFO: DMA interrupt mode MM2S=%u S2MM=%u\r\n",
+               (u32)XPAR_FABRIC_AXI_DMA_0_MM2S_INTROUT_INTR,
+               (u32)XPAR_FABRIC_AXI_DMA_0_S2MM_INTROUT_INTR);
 
     Xil_DCacheFlushRange((UINTPTR)tanimoto_tx_buffer,
                          TANIMOTO_TX_BUFFER_BYTES);
@@ -891,6 +888,8 @@ int main(void)
     failures += run_stress();
 
     if (failures == 0) {
+        xil_printf("DMA_IRQ_COUNTS mm2s=%u s2mm=%u polling=0\r\n",
+                   dma_device.mm2s_irq_count, dma_device.s2mm_irq_count);
         xil_printf("ALL DMA BATCH SELF-TESTS PASSED\r\n");
     } else {
         xil_printf("DMA BATCH SELF-TEST FAILED errors=%d\r\n", failures);

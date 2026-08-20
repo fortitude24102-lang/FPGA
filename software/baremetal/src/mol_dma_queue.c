@@ -34,6 +34,30 @@ static int add_u32_checked(uint32_t a, uint32_t b, uint32_t *sum)
     return MOL_DMA_OK;
 }
 
+void mol_dma_irq_record(mol_dma_irq_state_t *state, uint32_t direction,
+                        uint32_t irq_status)
+{
+    if (state == NULL) {
+        return;
+    }
+    if ((irq_status & MOL_DMA_IRQ_ERROR) != 0U) {
+        state->error = 1U;
+    }
+    if ((irq_status & MOL_DMA_IRQ_IOC) != 0U) {
+        if (direction == 0U) {
+            state->mm2s_done = 1U;
+        } else {
+            state->s2mm_done = 1U;
+        }
+    }
+}
+
+int mol_dma_irq_complete(const mol_dma_irq_state_t *state)
+{
+    return state != NULL && state->error == 0U &&
+           state->mm2s_done != 0U && state->s2mm_done != 0U;
+}
+
 int mol_dma_required_words(uint32_t task_id, uint32_t flags,
                            uint32_t item_count, uint32_t *payload_words,
                            uint32_t *result_words)
@@ -509,8 +533,14 @@ int mol_dma_find_response_bytes(const void *buffer, size_t capacity_bytes,
 #ifndef MOL_DMA_HOST_TEST
 #include "xaxidma_hw.h"
 #include "xil_cache.h"
+#include "xil_exception.h"
+#include "xparameters.h"
 #include "xstatus.h"
 #include "xtime_l.h"
+
+#ifndef XPAR_SCUGIC_0_DEVICE_ID
+#define XPAR_SCUGIC_0_DEVICE_ID 0U
+#endif
 
 static uint32_t dma_channel_status(const mol_dma_device_t *device,
                                    int direction)
@@ -519,6 +549,43 @@ static uint32_t dma_channel_status(const mol_dma_device_t *device,
                      XAXIDMA_RX_OFFSET : XAXIDMA_TX_OFFSET;
     return XAxiDma_ReadReg(device->instance.RegBase + offset,
                            XAXIDMA_SR_OFFSET);
+}
+
+static void dma_irq_handler(mol_dma_device_t *device, int direction,
+                            uint32_t portable_direction)
+{
+    uint32_t irq_status = XAxiDma_IntrGetIrq(&device->instance, direction);
+    uint32_t portable_status = 0U;
+
+    if ((irq_status & XAXIDMA_IRQ_ALL_MASK) == 0U) {
+        return;
+    }
+    XAxiDma_IntrAckIrq(&device->instance, irq_status, direction);
+    if ((irq_status & XAXIDMA_IRQ_IOC_MASK) != 0U) {
+        portable_status |= MOL_DMA_IRQ_IOC;
+        if (portable_direction == 0U) {
+            device->mm2s_irq_count += 1U;
+        } else {
+            device->s2mm_irq_count += 1U;
+        }
+    }
+    if ((irq_status & XAXIDMA_IRQ_ERROR_MASK) != 0U) {
+        portable_status |= MOL_DMA_IRQ_ERROR;
+    }
+    mol_dma_irq_record(&device->irq_state, portable_direction,
+                       portable_status);
+}
+
+static void dma_mm2s_isr(void *reference)
+{
+    dma_irq_handler((mol_dma_device_t *)reference,
+                    XAXIDMA_DMA_TO_DEVICE, 0U);
+}
+
+static void dma_s2mm_isr(void *reference)
+{
+    dma_irq_handler((mol_dma_device_t *)reference,
+                    XAXIDMA_DEVICE_TO_DMA, 1U);
 }
 
 int mol_dma_device_reset(mol_dma_device_t *device,
@@ -533,6 +600,14 @@ int mol_dma_device_reset(mol_dma_device_t *device,
         if (XAxiDma_ResetIsDone(&device->instance)) {
             device->last_mm2s_status = 0U;
             device->last_s2mm_status = 0U;
+            if (device->irqs_connected != 0U) {
+                XAxiDma_IntrEnable(&device->instance,
+                    XAXIDMA_IRQ_IOC_MASK | XAXIDMA_IRQ_ERROR_MASK,
+                    XAXIDMA_DMA_TO_DEVICE);
+                XAxiDma_IntrEnable(&device->instance,
+                    XAXIDMA_IRQ_IOC_MASK | XAXIDMA_IRQ_ERROR_MASK,
+                    XAXIDMA_DEVICE_TO_DMA);
+            }
             return MOL_DMA_OK;
         }
     }
@@ -547,6 +622,10 @@ int mol_dma_device_init(mol_dma_device_t *device, uint16_t device_id,
     if (device == NULL) {
         return MOL_DMA_ERR_ARGUMENT;
     }
+    device->initialized = 0U;
+    device->irqs_connected = 0U;
+    device->mm2s_irq_count = 0U;
+    device->s2mm_irq_count = 0U;
     config = XAxiDma_LookupConfig((uint32_t)device_id);
     if (config == NULL) {
         return MOL_DMA_ERR_HARDWARE;
@@ -562,14 +641,140 @@ int mol_dma_device_init(mol_dma_device_t *device, uint16_t device_id,
     return mol_dma_device_reset(device, reset_poll_limit);
 }
 
-int mol_dma_transfer_poll_ex(mol_dma_device_t *device,
-                             const void *tx_buffer, size_t tx_bytes,
-                             void *rx_buffer, size_t rx_capacity_bytes,
-                             uint32_t expected_batch_id,
-                             uint32_t poll_limit, size_t *response_bytes,
-                             uint32_t transfer_flags)
+int mol_dma_device_connect_irqs(mol_dma_device_t *device,
+                                uint32_t mm2s_irq_id,
+                                uint32_t s2mm_irq_id)
 {
-    uint32_t poll;
+    XScuGic_Config *config;
+    int status;
+
+    if (device == NULL || device->initialized == 0U ||
+        mm2s_irq_id == s2mm_irq_id) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+    config = XScuGic_LookupConfig(XPAR_SCUGIC_0_DEVICE_ID);
+    if (config == NULL) {
+        return MOL_DMA_ERR_HARDWARE;
+    }
+    status = XScuGic_CfgInitialize(&device->interrupt_controller, config,
+                                   config->CpuBaseAddress);
+    if (status != XST_SUCCESS) {
+        return MOL_DMA_ERR_HARDWARE;
+    }
+    status = XScuGic_Connect(&device->interrupt_controller, mm2s_irq_id,
+                             dma_mm2s_isr, device);
+    if (status != XST_SUCCESS) {
+        return MOL_DMA_ERR_HARDWARE;
+    }
+    status = XScuGic_Connect(&device->interrupt_controller, s2mm_irq_id,
+                             dma_s2mm_isr, device);
+    if (status != XST_SUCCESS) {
+        XScuGic_Disconnect(&device->interrupt_controller, mm2s_irq_id);
+        return MOL_DMA_ERR_HARDWARE;
+    }
+
+    device->mm2s_irq_id = mm2s_irq_id;
+    device->s2mm_irq_id = s2mm_irq_id;
+    device->irqs_connected = 1U;
+    XScuGic_SetPriorityTriggerType(&device->interrupt_controller,
+                                   mm2s_irq_id, 0xA0U, 0x3U);
+    XScuGic_SetPriorityTriggerType(&device->interrupt_controller,
+                                   s2mm_irq_id, 0xA0U, 0x3U);
+    XScuGic_Enable(&device->interrupt_controller, mm2s_irq_id);
+    XScuGic_Enable(&device->interrupt_controller, s2mm_irq_id);
+
+    XAxiDma_IntrAckIrq(&device->instance, XAXIDMA_IRQ_ALL_MASK,
+                       XAXIDMA_DMA_TO_DEVICE);
+    XAxiDma_IntrAckIrq(&device->instance, XAXIDMA_IRQ_ALL_MASK,
+                       XAXIDMA_DEVICE_TO_DMA);
+    XAxiDma_IntrEnable(&device->instance,
+                       XAXIDMA_IRQ_IOC_MASK | XAXIDMA_IRQ_ERROR_MASK,
+                       XAXIDMA_DMA_TO_DEVICE);
+    XAxiDma_IntrEnable(&device->instance,
+                       XAXIDMA_IRQ_IOC_MASK | XAXIDMA_IRQ_ERROR_MASK,
+                       XAXIDMA_DEVICE_TO_DMA);
+
+    Xil_ExceptionInit();
+    Xil_ExceptionRegisterHandler(
+        XIL_EXCEPTION_ID_INT,
+        (Xil_ExceptionHandler)XScuGic_InterruptHandler,
+        &device->interrupt_controller);
+    Xil_ExceptionEnable();
+    return MOL_DMA_OK;
+}
+
+int mol_dma_device_prepare_irqs(mol_dma_device_t *device)
+{
+    if (device == NULL || device->initialized == 0U ||
+        device->irqs_connected == 0U) {
+        return MOL_DMA_ERR_STATE;
+    }
+    device->irq_state.mm2s_done = 0U;
+    device->irq_state.s2mm_done = 0U;
+    device->irq_state.error = 0U;
+    XAxiDma_IntrAckIrq(&device->instance, XAXIDMA_IRQ_ALL_MASK,
+                       XAXIDMA_DMA_TO_DEVICE);
+    XAxiDma_IntrAckIrq(&device->instance, XAXIDMA_IRQ_ALL_MASK,
+                       XAXIDMA_DEVICE_TO_DMA);
+    return MOL_DMA_OK;
+}
+
+int mol_dma_device_wait_irqs(mol_dma_device_t *device,
+                             uint32_t required_events,
+                             uint64_t timeout_ticks,
+                             mol_dma_progress_fn progress,
+                             void *context)
+{
+    XTime start;
+    XTime now;
+    int complete;
+
+    if (device == NULL || device->irqs_connected == 0U ||
+        timeout_ticks == 0U || required_events == 0U ||
+        (required_events & ~(MOL_DMA_WAIT_MM2S | MOL_DMA_WAIT_S2MM)) != 0U) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+    XTime_GetTime(&start);
+    for (;;) {
+        if (device->irq_state.error != 0U) {
+            device->last_mm2s_status = dma_channel_status(
+                device, XAXIDMA_DMA_TO_DEVICE);
+            device->last_s2mm_status = dma_channel_status(
+                device, XAXIDMA_DEVICE_TO_DMA);
+            (void)mol_dma_device_reset(device, 1000000U);
+            return MOL_DMA_ERR_HARDWARE;
+        }
+        complete = (((required_events & MOL_DMA_WAIT_MM2S) == 0U) ||
+                    device->irq_state.mm2s_done != 0U) &&
+                   (((required_events & MOL_DMA_WAIT_S2MM) == 0U) ||
+                    device->irq_state.s2mm_done != 0U);
+        if (complete) {
+            return MOL_DMA_OK;
+        }
+        if (progress != NULL) {
+            progress(context);
+        }
+        XTime_GetTime(&now);
+        if ((uint64_t)(now - start) >= timeout_ticks) {
+            device->last_mm2s_status = dma_channel_status(
+                device, XAXIDMA_DMA_TO_DEVICE);
+            device->last_s2mm_status = dma_channel_status(
+                device, XAXIDMA_DEVICE_TO_DMA);
+            (void)mol_dma_device_reset(device, 1000000U);
+            return MOL_DMA_ERR_TIMEOUT;
+        }
+    }
+}
+
+int mol_dma_transfer_irq_ex(mol_dma_device_t *device,
+                            const void *tx_buffer, size_t tx_bytes,
+                            void *rx_buffer, size_t rx_capacity_bytes,
+                            uint32_t expected_batch_id,
+                            uint64_t timeout_ticks,
+                            mol_dma_progress_fn progress, void *context,
+                            size_t *response_bytes,
+                            uint32_t transfer_flags)
+{
     XTime phase_start;
     XTime phase_end;
     int status;
@@ -577,7 +782,7 @@ int mol_dma_transfer_poll_ex(mol_dma_device_t *device,
 
     if (device == NULL || device->initialized == 0U ||
         tx_buffer == NULL || rx_buffer == NULL || response_bytes == NULL ||
-        poll_limit == 0U ||
+        timeout_ticks == 0U || device->irqs_connected == 0U ||
         (transfer_flags & ~MOL_DMA_TRANSFER_TX_UNCACHED) != 0U) {
         return MOL_DMA_ERR_ARGUMENT;
     }
@@ -611,41 +816,29 @@ int mol_dma_transfer_poll_ex(mol_dma_device_t *device,
 
     /* Arm S2MM first so no result beat can be lost when MM2S starts. */
     XTime_GetTime(&phase_start);
+    rc = mol_dma_device_prepare_irqs(device);
+    if (rc != MOL_DMA_OK) {
+        return rc;
+    }
     status = XAxiDma_SimpleTransfer(&device->instance, (UINTPTR)rx_buffer,
                                     (uint32_t)rx_capacity_bytes,
                                     XAXIDMA_DEVICE_TO_DMA);
     if (status != XST_SUCCESS) {
-        (void)mol_dma_device_reset(device, poll_limit);
+        (void)mol_dma_device_reset(device, 1000000U);
         return MOL_DMA_ERR_HARDWARE;
     }
     status = XAxiDma_SimpleTransfer(&device->instance, (UINTPTR)tx_buffer,
                                     (uint32_t)tx_bytes,
                                     XAXIDMA_DMA_TO_DEVICE);
     if (status != XST_SUCCESS) {
-        (void)mol_dma_device_reset(device, poll_limit);
+        (void)mol_dma_device_reset(device, 1000000U);
         return MOL_DMA_ERR_HARDWARE;
     }
-
-    for (poll = 0U; poll < poll_limit; ++poll) {
-        device->last_mm2s_status = dma_channel_status(
-            device, XAXIDMA_DMA_TO_DEVICE);
-        device->last_s2mm_status = dma_channel_status(
-            device, XAXIDMA_DEVICE_TO_DMA);
-        if (((device->last_mm2s_status | device->last_s2mm_status) &
-             XAXIDMA_ERR_ALL_MASK) != 0U) {
-            (void)mol_dma_device_reset(device, poll_limit);
-            return MOL_DMA_ERR_HARDWARE;
-        }
-        /* Avoid XAxiDma_Busy(): it rereads both status registers that were
-         * already sampled above.  GP1 AXI-Lite reads dominate short batches. */
-        if (((device->last_mm2s_status & XAXIDMA_IDLE_MASK) != 0U) &&
-            ((device->last_s2mm_status & XAXIDMA_IDLE_MASK) != 0U)) {
-            break;
-        }
-    }
-    if (poll == poll_limit) {
-        (void)mol_dma_device_reset(device, poll_limit);
-        return MOL_DMA_ERR_TIMEOUT;
+    rc = mol_dma_device_wait_irqs(device,
+            MOL_DMA_WAIT_MM2S | MOL_DMA_WAIT_S2MM,
+            timeout_ticks, progress, context);
+    if (rc != MOL_DMA_OK) {
+        return rc;
     }
     XTime_GetTime(&phase_end);
     device->last_engine_ticks = (uint64_t)(phase_end - phase_start);
@@ -662,6 +855,20 @@ int mol_dma_transfer_poll_ex(mol_dma_device_t *device,
     XTime_GetTime(&phase_end);
     device->last_parse_ticks = (uint64_t)(phase_end - phase_start);
     return rc;
+}
+
+int mol_dma_transfer_poll_ex(mol_dma_device_t *device,
+                             const void *tx_buffer, size_t tx_bytes,
+                             void *rx_buffer, size_t rx_capacity_bytes,
+                             uint32_t expected_batch_id,
+                             uint32_t poll_limit, size_t *response_bytes,
+                             uint32_t transfer_flags)
+{
+    return mol_dma_transfer_irq_ex(device, tx_buffer, tx_bytes,
+                                   rx_buffer, rx_capacity_bytes,
+                                   expected_batch_id, poll_limit,
+                                   NULL, NULL, response_bytes,
+                                   transfer_flags);
 }
 
 int mol_dma_transfer_poll(mol_dma_device_t *device,

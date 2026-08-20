@@ -75,6 +75,14 @@ class ResultIterator(ctypes.Structure):
     ]
 
 
+class IrqState(ctypes.Structure):
+    _fields_ = [
+        ("mm2s_done", ctypes.c_uint32),
+        ("s2mm_done", ctypes.c_uint32),
+        ("error", ctypes.c_uint32),
+    ]
+
+
 def aligned_buffer(size: int) -> tuple[ctypes.Array, int]:
     raw = ctypes.create_string_buffer(size + 63)
     address = (ctypes.addressof(raw) + 63) & ~63
@@ -203,6 +211,37 @@ class MolDmaLayoutTests(unittest.TestCase):
             ERR_STATE,
         )
         self.assertIsNotNone(raw)
+
+    def test_irq_state_requires_both_channels_and_latches_errors(self) -> None:
+        self.assertTrue(
+            hasattr(self.lib, "mol_dma_irq_record"),
+            "mol_dma_irq_record is missing",
+        )
+        self.assertTrue(
+            hasattr(self.lib, "mol_dma_irq_complete"),
+            "mol_dma_irq_complete is missing",
+        )
+        record = self.lib.mol_dma_irq_record
+        record.argtypes = [
+            ctypes.POINTER(IrqState), ctypes.c_uint32, ctypes.c_uint32
+        ]
+        complete = self.lib.mol_dma_irq_complete
+        complete.argtypes = [ctypes.POINTER(IrqState)]
+        complete.restype = ctypes.c_int
+
+        state = IrqState()
+        record(ctypes.byref(state), 0, 1)
+        self.assertEqual((state.mm2s_done, state.s2mm_done, state.error),
+                         (1, 0, 0))
+        self.assertEqual(complete(ctypes.byref(state)), 0)
+        record(ctypes.byref(state), 1, 1)
+        self.assertEqual(complete(ctypes.byref(state)), 1)
+
+        failed = IrqState()
+        record(ctypes.byref(failed), 1, 2)
+        self.assertEqual((failed.mm2s_done, failed.s2mm_done, failed.error),
+                         (0, 0, 1))
+        self.assertEqual(complete(ctypes.byref(failed)), 0)
 
     def test_byte_exact_one_task_of_each_type(self) -> None:
         for task_id, flags, count in [
