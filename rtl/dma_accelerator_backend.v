@@ -107,6 +107,7 @@ module dma_accelerator_backend #(
 
     reg [2:0] ingress_route;
     reg [2:0] completion_owner;
+    reg [2:0] completion_next;
     reg completion_results;
     reg [31:0] completion_words_left;
     reg exclusive_active;
@@ -327,6 +328,7 @@ module dma_accelerator_backend #(
         if (!rst_n) begin
             ingress_route <= ROUTE_NONE;
             completion_owner <= ROUTE_NONE;
+            completion_next <= ROUTE_TANI;
             completion_results <= 1'b0;
             completion_words_left <= 0;
             exclusive_active <= 1'b0;
@@ -337,6 +339,7 @@ module dma_accelerator_backend #(
         end else if (abort) begin
             ingress_route <= ROUTE_NONE;
             completion_owner <= ROUTE_NONE;
+            completion_next <= ROUTE_TANI;
             completion_results <= 1'b0;
             completion_words_left <= 0;
             exclusive_active <= 1'b0;
@@ -361,17 +364,64 @@ module dma_accelerator_backend #(
                 ingress_route <= ROUTE_NONE;
 
             if (completion_owner == ROUTE_NONE) begin
-                if (tani_done_valid)
-                    completion_owner <= ROUTE_TANI;
-                else if (admet_done_valid_i)
-                    completion_owner <= ROUTE_ADMET;
-                else if (gnn_done_valid_i)
-                    completion_owner <= ROUTE_GNN;
-                else if (exclusive_done_valid_i)
-                    completion_owner <= ROUTE_EXCLUSIVE;
+                case (completion_next)
+                    ROUTE_TANI: begin
+                        if (tani_done_valid)
+                            completion_owner <= ROUTE_TANI;
+                        else if (gnn_done_valid_i)
+                            completion_owner <= ROUTE_GNN;
+                        else if (admet_done_valid_i)
+                            completion_owner <= ROUTE_ADMET;
+                        else if (exclusive_done_valid_i)
+                            completion_owner <= ROUTE_EXCLUSIVE;
+                    end
+                    ROUTE_GNN: begin
+                        if (gnn_done_valid_i)
+                            completion_owner <= ROUTE_GNN;
+                        else if (admet_done_valid_i)
+                            completion_owner <= ROUTE_ADMET;
+                        else if (exclusive_done_valid_i)
+                            completion_owner <= ROUTE_EXCLUSIVE;
+                        else if (tani_done_valid)
+                            completion_owner <= ROUTE_TANI;
+                    end
+                    ROUTE_ADMET: begin
+                        if (admet_done_valid_i)
+                            completion_owner <= ROUTE_ADMET;
+                        else if (exclusive_done_valid_i)
+                            completion_owner <= ROUTE_EXCLUSIVE;
+                        else if (tani_done_valid)
+                            completion_owner <= ROUTE_TANI;
+                        else if (gnn_done_valid_i)
+                            completion_owner <= ROUTE_GNN;
+                    end
+                    default: begin
+                        if (exclusive_done_valid_i)
+                            completion_owner <= ROUTE_EXCLUSIVE;
+                        else if (tani_done_valid)
+                            completion_owner <= ROUTE_TANI;
+                        else if (gnn_done_valid_i)
+                            completion_owner <= ROUTE_GNN;
+                        else if (admet_done_valid_i)
+                            completion_owner <= ROUTE_ADMET;
+                    end
+                endcase
             end else if (!completion_results && done_valid && done_ready) begin
-                completion_results <= 1'b1;
-                completion_words_left <= done_result_words;
+                case (completion_owner)
+                    ROUTE_TANI: completion_next <= ROUTE_GNN;
+                    ROUTE_GNN: completion_next <= ROUTE_ADMET;
+                    ROUTE_ADMET: completion_next <= ROUTE_EXCLUSIVE;
+                    default: completion_next <= ROUTE_TANI;
+                endcase
+                if (done_result_words == 0) begin
+                    if (completion_owner == ROUTE_EXCLUSIVE)
+                        exclusive_active <= 1'b0;
+                    completion_owner <= ROUTE_NONE;
+                    completion_words_left <= 0;
+                end else begin
+                    completion_results <= 1'b1;
+                    completion_words_left <= done_result_words;
+                end
             end else if (completion_results && result_valid && result_ready) begin
                 if (completion_words_left == 1) begin
                     if (completion_owner == ROUTE_EXCLUSIVE)
@@ -1111,7 +1161,7 @@ module dma_accelerator_lane_controller #(
                     ST_DONE: if (done_valid && done_ready) begin
                         result_index <= 0;
                         result_valid_reg <= 1'b0;
-                        state <= ST_RESULT;
+                        state <= (result_words_reg == 0) ? ST_IDLE : ST_RESULT;
                     end
 
                     ST_RESULT: begin

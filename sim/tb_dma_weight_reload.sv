@@ -49,6 +49,7 @@ module tb_dma_weight_reload;
         .task_valid(task_valid), .task_ready(task_ready),
         .task_id(8'hFE), .task_flags(32'd0),
         .task_item_count(32'd1),
+        .task_sequence(6'd0),
         .payload_valid(payload_valid), .payload_ready(payload_ready),
         .payload_data(payload_data), .payload_last(payload_last),
         .done_valid(done_valid), .done_ready(1'b1), .done_status(),
