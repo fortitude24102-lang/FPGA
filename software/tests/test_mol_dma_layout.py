@@ -97,7 +97,7 @@ def task_requirements(task_id: int, flags: int, count: int) -> tuple[int, int]:
     if task_id == TANIMOTO:
         return ((32 + 32 * count, count) if flags & SHARED_QUERY else (64, 1))
     if task_id == GNN:
-        return 1679, (3200 if flags & FULL_GNN else 1)
+        return 1679 * count, (3200 if flags & FULL_GNN else 1) * count
     if task_id == ADMET:
         return 20 * count, 4 * count
     if task_id == WEIGHT_RELOAD:
@@ -105,10 +105,10 @@ def task_requirements(task_id: int, flags: int, count: int) -> tuple[int, int]:
             raise ValueError("invalid reload request")
         return 4538, 1
     if flags & FULL_GNN:
-        return 1763, 3205
+        return 1763 * count, 3205 * count
     if flags & INTERMEDIATE:
-        return 1763, 6
-    return 1763, 4
+        return 1763 * count, 6 * count
+    return 1763 * count, 4 * count
 
 
 class MolDmaLayoutTests(unittest.TestCase):
@@ -161,6 +161,8 @@ class MolDmaLayoutTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        ctypes.windll.kernel32.FreeLibrary(cls.lib._handle)
+        cls.lib = None
         cls.temp_dir.cleanup()
 
     def new_builder(self, capacity: int = 2 * 1024 * 1024,
@@ -302,6 +304,69 @@ class MolDmaLayoutTests(unittest.TestCase):
         self.assertEqual(rc, ERR_RANGE)
         self.assertEqual(builder.used_words, before)
         self.assertIsNotNone(raw)
+
+    @staticmethod
+    def batched_success_frame(task_id: int, item_count: int,
+                              result_words: int) -> bytes:
+        body = [7, task_id, result_words, 1, 0, item_count, 0xA5, 0]
+        body.extend([0] * result_words)
+        total_words = 8 + len(body) + 8
+        return struct.pack(
+            f"<{total_words}I",
+            MOLR, VERSION_HEADER, 0xBA7C0001, 1, 0, total_words, 0, 0,
+            *body,
+            MOLE, 0xBA7C0001, 1, 0, total_words, 0, 0xFFFFFFFF, 0,
+        )
+
+    def test_batched_gnn_and_pipeline_builder_and_parser(self) -> None:
+        cases = [
+            (GNN, 0, 16), (GNN, 0, 32), (GNN, FULL_GNN, 32),
+            (PIPELINE, 0, 8), (PIPELINE, 0, 16), (PIPELINE, INTERMEDIATE, 16),
+            (PIPELINE, FULL_GNN | INTERMEDIATE, 16),
+        ]
+        for task_id, flags, item_count in cases:
+            with self.subTest(task=task_id, flags=flags, count=item_count):
+                raw, address, builder = self.new_builder(max_result_words=200000)
+                self.add_task(builder, 7, task_id, flags, item_count)
+                transfer_bytes = ctypes.c_size_t()
+                self.assertEqual(
+                    self.lib.mol_dma_builder_finalize(
+                        ctypes.byref(builder), ctypes.byref(transfer_bytes)
+                    ), OK
+                )
+                payload_words, result_words = task_requirements(
+                    task_id, flags, item_count
+                )
+                header = struct.unpack_from("<8I", ctypes.string_at(address, transfer_bytes.value), 0)
+                task_header = struct.unpack_from("<8I", ctypes.string_at(address, transfer_bytes.value), 32)
+                self.assertEqual((header[4], task_header[2], task_header[3], task_header[4]),
+                                 (8 + 8 + payload_words, payload_words,
+                                  result_words, item_count))
+
+                frame = self.batched_success_frame(task_id, item_count, result_words)
+                response_raw, response_address = aligned_buffer(len(frame))
+                ctypes.memmove(response_address, frame, len(frame))
+                iterator = ResultIterator()
+                self.assertEqual(self.lib.mol_dma_results_open(
+                    ctypes.byref(iterator), response_address, len(frame), 0xBA7C0001
+                ), OK)
+                view = ResultView()
+                self.assertEqual(self.lib.mol_dma_results_next(
+                    ctypes.byref(iterator), ctypes.byref(view)), 1)
+                self.assertEqual((view.task_id, view.item_count, view.result_words),
+                                 (task_id, item_count, result_words))
+                self.assertIsNotNone(raw)
+                self.assertIsNotNone(response_raw)
+
+        for task_id, item_count in ((GNN, 33), (PIPELINE, 17)):
+            with self.subTest(rejected_task=task_id, count=item_count):
+                raw, _, builder = self.new_builder()
+                payload = words([0])
+                self.assertLess(self.lib.mol_dma_builder_add_task(
+                    ctypes.byref(builder), 1, task_id, 0, item_count,
+                    0, 1, payload, 1, 1
+                ), 0)
+                self.assertIsNotNone(raw)
 
     def test_result_parser_accepts_weight_reload_success(self) -> None:
         total_words = 8 + 8 + 1 + 8

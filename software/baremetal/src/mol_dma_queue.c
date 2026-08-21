@@ -34,6 +34,15 @@ static int add_u32_checked(uint32_t a, uint32_t b, uint32_t *sum)
     return MOL_DMA_OK;
 }
 
+static int multiply_u32_checked(uint32_t a, uint32_t b, uint32_t *product)
+{
+    if (product == NULL || (b != 0U && a > UINT32_MAX / b)) {
+        return MOL_DMA_ERR_RANGE;
+    }
+    *product = a * b;
+    return MOL_DMA_OK;
+}
+
 void mol_dma_irq_record(mol_dma_irq_state_t *state, uint32_t direction,
                         uint32_t irq_status)
 {
@@ -64,6 +73,7 @@ int mol_dma_required_words(uint32_t task_id, uint32_t flags,
 {
     uint32_t payload = 0U;
     uint32_t result = 0U;
+    int rc;
 
     if (payload_words == NULL || result_words == NULL || item_count == 0U ||
         item_count > MOL_DMA_MAX_ITEM_COUNT) {
@@ -76,8 +86,15 @@ int mol_dma_required_words(uint32_t task_id, uint32_t flags,
             return MOL_DMA_ERR_ARGUMENT;
         }
         if ((flags & MOL_DMA_FLAG_SHARED_QUERY) != 0U) {
-            payload = MOL_DMA_PAYLOAD_WORDS_FINGERPRINT +
-                      item_count * MOL_DMA_PAYLOAD_WORDS_FINGERPRINT;
+            rc = multiply_u32_checked(item_count,
+                                      MOL_DMA_PAYLOAD_WORDS_FINGERPRINT,
+                                      &payload);
+            if (rc != MOL_DMA_OK ||
+                add_u32_checked(payload,
+                                MOL_DMA_PAYLOAD_WORDS_FINGERPRINT,
+                                &payload) != MOL_DMA_OK) {
+                return MOL_DMA_ERR_RANGE;
+            }
             result = item_count;
         } else {
             if (item_count != 1U) {
@@ -88,33 +105,61 @@ int mol_dma_required_words(uint32_t task_id, uint32_t flags,
         }
         break;
     case MOL_DMA_TASK_GNN:
-        if ((flags & ~MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0U || item_count != 1U) {
+        if ((flags & ~MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0U ||
+            item_count > 32U) {
             return MOL_DMA_ERR_ARGUMENT;
         }
-        payload = MOL_DMA_PAYLOAD_WORDS_GNN_TOTAL;
-        result = ((flags & MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0U) ?
-                 MOL_DMA_PAYLOAD_WORDS_GNN_FULL_RESULT : 1U;
+        rc = multiply_u32_checked(item_count, MOL_DMA_PAYLOAD_WORDS_GNN_TOTAL,
+                                  &payload);
+        if (rc != MOL_DMA_OK) {
+            return rc;
+        }
+        rc = multiply_u32_checked(item_count,
+                                  ((flags & MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0U) ?
+                                  MOL_DMA_PAYLOAD_WORDS_GNN_FULL_RESULT : 1U,
+                                  &result);
+        if (rc != MOL_DMA_OK) {
+            return rc;
+        }
         break;
     case MOL_DMA_TASK_ADMET:
         if (flags != 0U) {
             return MOL_DMA_ERR_ARGUMENT;
         }
-        payload = item_count * MOL_DMA_PAYLOAD_WORDS_ADMET_PER_ITEM;
-        result = item_count * MOL_DMA_PAYLOAD_WORDS_ADMET_RESULTS_PER_ITEM;
+        rc = multiply_u32_checked(item_count,
+                                  MOL_DMA_PAYLOAD_WORDS_ADMET_PER_ITEM,
+                                  &payload);
+        if (rc != MOL_DMA_OK) {
+            return rc;
+        }
+        rc = multiply_u32_checked(item_count,
+                                  MOL_DMA_PAYLOAD_WORDS_ADMET_RESULTS_PER_ITEM,
+                                  &result);
+        if (rc != MOL_DMA_OK) {
+            return rc;
+        }
         break;
     case MOL_DMA_TASK_PIPELINE:
         if ((flags & ~(MOL_DMA_FLAG_FULL_GNN_OUTPUT |
                        MOL_DMA_FLAG_RETURN_INTERMEDIATE)) != 0U ||
-            item_count != 1U) {
+            item_count > 16U) {
             return MOL_DMA_ERR_ARGUMENT;
         }
-        payload = MOL_DMA_PAYLOAD_WORDS_PIPELINE_TOTAL;
+        rc = multiply_u32_checked(item_count,
+                                  MOL_DMA_PAYLOAD_WORDS_PIPELINE_TOTAL,
+                                  &payload);
+        if (rc != MOL_DMA_OK) {
+            return rc;
+        }
         if ((flags & MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0U) {
-            result = 3205U;
+            rc = multiply_u32_checked(item_count, 3205U, &result);
         } else if ((flags & MOL_DMA_FLAG_RETURN_INTERMEDIATE) != 0U) {
-            result = 6U;
+            rc = multiply_u32_checked(item_count, 6U, &result);
         } else {
-            result = 4U;
+            rc = multiply_u32_checked(item_count, 4U, &result);
+        }
+        if (rc != MOL_DMA_OK) {
+            return rc;
         }
         break;
     case MOL_DMA_TASK_WEIGHT_RELOAD:
@@ -291,6 +336,7 @@ int mol_dma_builder_finalize(mol_dma_builder_t *builder,
 static int valid_success_result_size(uint32_t task_id, uint32_t item_count,
                                      uint32_t result_words)
 {
+    uint32_t words;
     if (item_count == 0U || item_count > MOL_DMA_MAX_ITEM_COUNT) {
         return 0;
     }
@@ -298,16 +344,32 @@ static int valid_success_result_size(uint32_t task_id, uint32_t item_count,
     case MOL_DMA_TASK_TANIMOTO:
         return result_words == item_count;
     case MOL_DMA_TASK_GNN:
-        return item_count == 1U &&
-               (result_words == 1U ||
-                result_words == MOL_DMA_PAYLOAD_WORDS_GNN_FULL_RESULT);
+        if (item_count > 32U ||
+            multiply_u32_checked(item_count,
+                                 MOL_DMA_PAYLOAD_WORDS_GNN_FULL_RESULT,
+                                 &words) != MOL_DMA_OK) {
+            return 0;
+        }
+        return result_words == item_count || result_words == words;
     case MOL_DMA_TASK_ADMET:
-        return result_words ==
-               item_count * MOL_DMA_PAYLOAD_WORDS_ADMET_RESULTS_PER_ITEM;
+        return multiply_u32_checked(item_count,
+                                    MOL_DMA_PAYLOAD_WORDS_ADMET_RESULTS_PER_ITEM,
+                                    &words) == MOL_DMA_OK &&
+               result_words == words;
     case MOL_DMA_TASK_PIPELINE:
-        return item_count == 1U &&
-               (result_words == 4U || result_words == 6U ||
-                result_words == 3205U);
+        if (item_count > 16U) {
+            return 0;
+        }
+        if (multiply_u32_checked(item_count, 4U, &words) == MOL_DMA_OK &&
+            result_words == words) {
+            return 1;
+        }
+        if (multiply_u32_checked(item_count, 6U, &words) == MOL_DMA_OK &&
+            result_words == words) {
+            return 1;
+        }
+        return multiply_u32_checked(item_count, 3205U, &words) == MOL_DMA_OK &&
+               result_words == words;
     case MOL_DMA_TASK_WEIGHT_RELOAD:
         return item_count == 1U && result_words == 1U;
     default:
