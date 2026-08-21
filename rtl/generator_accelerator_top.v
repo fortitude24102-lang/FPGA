@@ -89,7 +89,10 @@ module generator_accelerator_top #(
     output wire [15:0]                     m_axis_result_tkeep,
     output wire                            m_axis_result_tvalid,
     input  wire                            m_axis_result_tready,
-    output wire                            m_axis_result_tlast
+    output wire                            m_axis_result_tlast,
+    output wire [2:0]                      engine_busy,
+    output wire [2:0]                      engine_start,
+    output wire [2:0]                      engine_done
 );
 
     localparam integer GNN_FEATURE_BITS =
@@ -621,6 +624,7 @@ module generator_accelerator_top #(
     wire [23:0] backend_done_status;
     wire [31:0] backend_done_result_words;
     wire [31:0] backend_done_detail;
+    wire [5:0] backend_done_sequence_unused;
     wire backend_result_valid;
     wire backend_result_ready;
     wire [31:0] backend_result_data;
@@ -754,6 +758,7 @@ module generator_accelerator_top #(
         .task_valid(backend_task_valid), .task_ready(backend_task_ready),
         .task_id(backend_task_id), .task_flags(backend_task_flags),
         .task_item_count(backend_task_item_count),
+        .task_sequence(6'd0),
         .payload_valid(backend_payload_valid),
         .payload_ready(backend_payload_ready),
         .payload_data(backend_payload_data), .payload_last(backend_payload_last),
@@ -761,8 +766,11 @@ module generator_accelerator_top #(
         .done_status(backend_done_status),
         .done_result_words(backend_done_result_words),
         .done_detail(backend_done_detail),
+        .done_sequence(backend_done_sequence_unused),
         .result_valid(backend_result_valid), .result_ready(backend_result_ready),
         .result_data(backend_result_data), .abort(backend_abort),
+        .engine_busy(engine_busy), .engine_start(engine_start),
+        .engine_done(engine_done),
         .tanimoto_start(dma_tanimoto_start),
         .fingerprint_we(dma_fingerprint_we),
         .fingerprint_db_select(dma_fingerprint_db_select),
