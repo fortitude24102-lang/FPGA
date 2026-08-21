@@ -23,46 +23,88 @@ static void store_le32(uint8_t *bytes, uint32_t value)
     bytes[3] = (uint8_t)(value >> 24);
 }
 
-int mol_tcp_dma_shape(uint8_t task_id, uint32_t batch_size,
-                      uint32_t *dma_flags, uint32_t *payload_words,
-                      uint32_t *result_words)
+static int multiply_words(uint32_t left, uint32_t right, uint32_t *product)
 {
-    if (dma_flags == NULL || payload_words == NULL || result_words == NULL) {
+    if (right != 0U && left > UINT32_MAX / right) {
+        return MOL_TCP_ERR_BAD_LENGTH;
+    }
+    *product = left * right;
+    return MOL_TCP_OK;
+}
+
+int mol_tcp_dma_shape(uint8_t task_id, uint32_t batch_size,
+                      uint32_t *dma_flags, uint32_t *item_count,
+                      uint32_t *payload_words, uint32_t *result_words)
+{
+    int rc;
+
+    if (dma_flags == NULL || item_count == NULL || payload_words == NULL ||
+        result_words == NULL) {
         return MOL_TCP_ERR_ARGUMENT;
     }
     if (batch_size == 0U || batch_size > MOL_DMA_MAX_ITEM_COUNT) {
         return MOL_TCP_ERR_BAD_BATCH;
     }
     *dma_flags = 0U;
+    *item_count = batch_size;
     switch (task_id) {
     case MOL_DMA_TASK_TANIMOTO:
         if (batch_size == 1U) {
             *payload_words = MOL_DMA_PAYLOAD_WORDS_TANIMOTO_PAIR;
         } else {
             *dma_flags = MOL_DMA_FLAG_SHARED_QUERY;
-            *payload_words = MOL_DMA_PAYLOAD_WORDS_FINGERPRINT +
-                             batch_size * MOL_DMA_PAYLOAD_WORDS_FINGERPRINT;
+            rc = multiply_words(batch_size,
+                                MOL_DMA_PAYLOAD_WORDS_FINGERPRINT,
+                                payload_words);
+            if (rc != MOL_TCP_OK) {
+                return rc;
+            }
+            *payload_words += MOL_DMA_PAYLOAD_WORDS_FINGERPRINT;
         }
         *result_words = batch_size;
         return MOL_TCP_OK;
     case MOL_DMA_TASK_GNN:
-        if (batch_size != 1U) {
+        if (batch_size > 32U) {
             return MOL_TCP_ERR_BAD_BATCH;
         }
-        *payload_words = MOL_DMA_PAYLOAD_WORDS_GNN_TOTAL;
-        *result_words = 1U;
+        rc = multiply_words(batch_size, MOL_DMA_PAYLOAD_WORDS_GNN_TOTAL,
+                            payload_words);
+        if (rc != MOL_TCP_OK) {
+            return rc;
+        }
+        *result_words = batch_size;
         return MOL_TCP_OK;
     case MOL_DMA_TASK_ADMET:
-        *payload_words = batch_size * MOL_DMA_PAYLOAD_WORDS_ADMET_PER_ITEM;
-        *result_words =
-            batch_size * MOL_DMA_PAYLOAD_WORDS_ADMET_RESULTS_PER_ITEM;
-        return MOL_TCP_OK;
-    case MOL_DMA_TASK_PIPELINE:
-        if (batch_size != 1U) {
+        if (batch_size > 64U) {
             return MOL_TCP_ERR_BAD_BATCH;
         }
-        *payload_words = MOL_DMA_PAYLOAD_WORDS_PIPELINE_TOTAL;
-        *result_words = 4U;
+        rc = multiply_words(batch_size, MOL_DMA_PAYLOAD_WORDS_ADMET_PER_ITEM,
+                            payload_words);
+        if (rc != MOL_TCP_OK) {
+            return rc;
+        }
+        rc = multiply_words(batch_size,
+                            MOL_DMA_PAYLOAD_WORDS_ADMET_RESULTS_PER_ITEM,
+                            result_words);
+        if (rc != MOL_TCP_OK) {
+            return rc;
+        }
+        return MOL_TCP_OK;
+    case MOL_DMA_TASK_PIPELINE:
+        if (batch_size > 16U) {
+            return MOL_TCP_ERR_BAD_BATCH;
+        }
+        rc = multiply_words(batch_size, MOL_DMA_PAYLOAD_WORDS_PIPELINE_TOTAL,
+                            payload_words);
+        if (rc != MOL_TCP_OK) {
+            return rc;
+        }
+        rc = multiply_words(batch_size,
+                            MOL_DMA_PAYLOAD_WORDS_ADMET_RESULTS_PER_ITEM,
+                            result_words);
+        if (rc != MOL_TCP_OK) {
+            return rc;
+        }
         return MOL_TCP_OK;
     case MOL_DMA_TASK_WEIGHT_RELOAD:
         if (batch_size != 1U) {
@@ -81,6 +123,7 @@ int mol_tcp_decode_header(const uint8_t bytes[MOL_TCP_HEADER_BYTES],
 {
     uint32_t dma_flags;
     uint32_t payload_words;
+    uint32_t item_count;
     uint32_t result_words;
     int rc;
 
@@ -100,12 +143,19 @@ int mol_tcp_decode_header(const uint8_t bytes[MOL_TCP_HEADER_BYTES],
     header->trace_id = load_le32(bytes + 8U);
     header->batch_size = load_le32(bytes + 12U);
 
+    if (header->task_id == UINT8_C(0xFD)) {
+        return (header->batch_size == 1U && header->payload_len == 0U) ?
+               MOL_TCP_OK : MOL_TCP_ERR_BAD_LENGTH;
+    }
+
     rc = mol_tcp_dma_shape(header->task_id, header->batch_size,
-                           &dma_flags, &payload_words, &result_words);
+                           &dma_flags, &item_count, &payload_words,
+                           &result_words);
     if (rc != MOL_TCP_OK) {
         return rc;
     }
     (void)dma_flags;
+    (void)item_count;
     (void)result_words;
     if (payload_words > MOL_TCP_SLOT_BYTES / 4U ||
         header->payload_len != payload_words * 4U) {

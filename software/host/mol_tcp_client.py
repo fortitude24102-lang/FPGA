@@ -11,7 +11,7 @@ MAGIC = 0x5A
 VERSION = 1
 HEADER_BYTES = 16
 PORT = 5001
-MAX_PAYLOAD_BYTES = 24576
+MAX_PAYLOAD_BYTES = 256 * 1024
 
 FLAG_RESPONSE = 0x01
 FLAG_BUSY = 0x02
@@ -60,20 +60,24 @@ class Response:
 
 
 def payload_words(task_id, batch_size):
-    if not 1 <= batch_size <= 64:
-        raise ValueError("batch size must be in 1..64")
+    if batch_size < 1:
+        raise ValueError("batch size must be positive")
     if task_id == TASK_TANIMOTO:
+        if batch_size > 128:
+            raise ValueError("Tanimoto batch size must be in 1..128")
         return 64 if batch_size == 1 else 32 + 32 * batch_size
     if task_id == TASK_GNN:
-        if batch_size != 1:
-            raise ValueError("GNN batch size must be 1")
-        return 1679
+        if batch_size > 32:
+            raise ValueError("GNN batch size must be in 1..32")
+        return 1679 * batch_size
     if task_id == TASK_ADMET:
+        if batch_size > 64:
+            raise ValueError("ADMET batch size must be in 1..64")
         return 20 * batch_size
     if task_id == TASK_PIPELINE:
-        if batch_size != 1:
-            raise ValueError("Pipeline batch size must be 1")
-        return 1763
+        if batch_size > 16:
+            raise ValueError("Pipeline batch size must be in 1..16")
+        return 1763 * batch_size
     if task_id == TASK_RELOAD:
         if batch_size != 1:
             raise ValueError("reload batch size must be 1")
@@ -169,31 +173,56 @@ def _words(values):
 
 
 def tanimoto_payload(query_word, target_word, batch_size=1):
+    payload_words(TASK_TANIMOTO, batch_size)
     if batch_size == 1:
         return _words([query_word] * 32 + [target_word] * 32)
     return _words([query_word] * 32 + [target_word] * (32 * batch_size))
 
 
-def gnn_payload():
-    values = [0] * 1679
-    values[0] = 1
-    values[79] = 0x100
-    return _words(values)
-
-
-def admet_payload(batch_size=1):
-    values = [0] * (20 * batch_size)
+def gnn_payload(batch_size=1):
+    payload_words(TASK_GNN, batch_size)
+    values = [0] * (1679 * batch_size)
     for item in range(batch_size):
-        values[item * 20] = 0x100
+        values[item * 1679] = item + 1
+        values[item * 1679 + 79] = 0x100
     return _words(values)
 
 
-def pipeline_payload():
-    return (
+def admet_payload(items=1):
+    if isinstance(items, int):
+        items = [0x100] * items
+    if not 1 <= len(items) <= 64:
+        raise ValueError("ADMET batch size must be in 1..64")
+    values = [0] * (20 * len(items))
+    for item, marker in enumerate(items):
+        values[item * 20] = marker
+    return _words(values)
+
+
+def pipeline_payload(batch_size=1):
+    if not 1 <= batch_size <= 16:
+        raise ValueError("Pipeline batch size must be in 1..16")
+    return b"".join(
         tanimoto_payload(0xFFFFFFFF, 0xFFFFFFFF)
         + gnn_payload()
         + admet_payload()
+        for _ in range(batch_size)
     )
+
+
+def split_results(task_id, words, batch_size):
+    if batch_size < 1:
+        raise ValueError("response batch size must be positive")
+    if task_id == TASK_RELOAD:
+        if batch_size != 1 or len(words) != 1:
+            raise ValueError("reload response must contain one epoch")
+        return (tuple(words),)
+    width = 1 if task_id in (TASK_TANIMOTO, TASK_GNN) else 4
+    if task_id not in (TASK_TANIMOTO, TASK_GNN, TASK_ADMET, TASK_PIPELINE) or \
+            len(words) != batch_size * width:
+        raise ValueError("response result shape does not match task batch")
+    return tuple(tuple(words[index:index + width])
+                 for index in range(0, len(words), width))
 
 
 def _read_mem(path, expected_count):

@@ -14,7 +14,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SRC = ROOT / "software" / "baremetal" / "src"
 HEADER_BYTES = 16
-SLOT_BYTES = 24 * 1024
+SLOT_BYTES = 256 * 1024
 QUEUE_DEPTH = 8
 OK = 0
 BUSY = 1
@@ -97,7 +97,7 @@ class MolTcpProtocolTests(unittest.TestCase):
         cls.lib.mol_tcp_dma_shape.argtypes = [
             ctypes.c_uint8, ctypes.c_uint32,
             ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
-            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
         ]
         cls.lib.mol_tcp_stream_init.argtypes = [ctypes.POINTER(Stream)]
         cls.lib.mol_tcp_stream_feed.argtypes = [
@@ -119,6 +119,9 @@ class MolTcpProtocolTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        if cls.lib is not None:
+            ctypes.windll.kernel32.FreeLibrary(cls.lib._handle)
+            cls.lib = None
         cls.temp_dir.cleanup()
 
     @staticmethod
@@ -149,27 +152,41 @@ class MolTcpProtocolTests(unittest.TestCase):
 
         shapes = [
             (0, 1, 0, 64, 1),
-            (0, 64, 0x400, 2080, 64),
+            (0, 128, 0x400, 4128, 128),
             (1, 1, 0, 1679, 1),
+            (1, 16, 0, 26864, 16),
+            (1, 32, 0, 53728, 32),
             (2, 64, 0, 1280, 256),
-            (3, 1, 0, 1763, 4),
+            (3, 8, 0, 14104, 32),
+            (3, 16, 0, 28208, 64),
             (0xFE, 1, 0, 4538, 1),
         ]
         for task, batch, expected_flags, expected_payload, expected_result in shapes:
             flags = ctypes.c_uint32()
+            item_count = ctypes.c_uint32()
             payload = ctypes.c_uint32()
             result = ctypes.c_uint32()
             self.assertEqual(
                 self.lib.mol_tcp_dma_shape(
-                    task, batch, ctypes.byref(flags), ctypes.byref(payload),
-                    ctypes.byref(result)
+                    task, batch, ctypes.byref(flags), ctypes.byref(item_count),
+                    ctypes.byref(payload), ctypes.byref(result)
                 ),
                 OK,
             )
             self.assertEqual(
-                (flags.value, payload.value, result.value),
-                (expected_flags, expected_payload, expected_result),
+                (flags.value, item_count.value, payload.value, result.value),
+                (expected_flags, batch, expected_payload, expected_result),
             )
+
+    def test_status_request_is_local_and_slot_overflow_is_rejected(self) -> None:
+        rc, header = self.decode(request_header(0xFD, 0, 11, 1))
+        self.assertEqual(rc, OK)
+        self.assertEqual((header.task_id, header.payload_len, header.batch_size),
+                         (0xFD, 0, 1))
+        oversized = Header(0, 0, 0, SLOT_BYTES + 4, 12, 1)
+        encoded = (ctypes.c_uint8 * HEADER_BYTES)()
+        rc = self.lib.mol_tcp_encode_header(encoded, ctypes.byref(oversized))
+        self.assertLess(rc, 0)
 
     def test_header_rejects_bad_contract_fields(self) -> None:
         valid = bytearray(request_header(0, 256, 7, 1))

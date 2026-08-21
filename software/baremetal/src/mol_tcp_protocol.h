@@ -12,7 +12,7 @@ extern "C" {
 #define MOL_TCP_VERSION UINT32_C(1)
 #define MOL_TCP_HEADER_BYTES UINT32_C(16)
 #define MOL_TCP_QUEUE_DEPTH UINT32_C(8)
-#define MOL_TCP_SLOT_BYTES UINT32_C(24576)
+#define MOL_TCP_SLOT_BYTES (UINT32_C(256) * UINT32_C(1024))
 
 #define MOL_TCP_FLAG_RESPONSE UINT32_C(1)
 #define MOL_TCP_FLAG_BUSY UINT32_C(2)
@@ -77,8 +77,8 @@ typedef struct {
 } mol_tcp_request_queue_t;
 
 int mol_tcp_dma_shape(uint8_t task_id, uint32_t batch_size,
-                      uint32_t *dma_flags, uint32_t *payload_words,
-                      uint32_t *result_words);
+                      uint32_t *dma_flags, uint32_t *item_count,
+                      uint32_t *payload_words, uint32_t *result_words);
 int mol_tcp_decode_header(const uint8_t bytes[MOL_TCP_HEADER_BYTES],
                           mol_tcp_header_t *header);
 int mol_tcp_encode_header(uint8_t bytes[MOL_TCP_HEADER_BYTES],

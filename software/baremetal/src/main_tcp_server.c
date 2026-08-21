@@ -415,6 +415,7 @@ static int execute_dma_task(uint8_t task_id, uint32_t trace_id,
     mol_dma_builder_t builder;
     mol_dma_result_iterator_t iterator;
     uint32_t dma_flags;
+    uint32_t item_count;
     uint32_t expected_payload_words;
     uint32_t result_words;
     uint32_t batch_id = next_batch_id++;
@@ -424,8 +425,10 @@ static int execute_dma_task(uint8_t task_id, uint32_t trace_id,
     int rc;
 
     rc = mol_tcp_dma_shape(task_id, batch_size, &dma_flags,
-                           &expected_payload_words, &result_words);
-    if (rc != MOL_TCP_OK || expected_payload_words != payload_words) {
+                           &item_count, &expected_payload_words,
+                           &result_words);
+    if (rc != MOL_TCP_OK || item_count != batch_size ||
+        expected_payload_words != payload_words) {
         return MOL_DMA_ERR_ARGUMENT;
     }
     rc = mol_dma_builder_init(&builder, dma_tx, sizeof(dma_tx), batch_id,
@@ -497,6 +500,7 @@ static void dispatch_one_request(void)
 {
     mol_dma_result_view_t result;
     uint32_t dma_flags;
+    uint32_t item_count;
     uint32_t payload_words;
     uint32_t result_words;
     int rc;
@@ -521,9 +525,10 @@ static void dispatch_one_request(void)
 
     rc = mol_tcp_dma_shape(current_request.header.task_id,
                            current_request.header.batch_size,
-                           &dma_flags, &payload_words, &result_words);
+                           &dma_flags, &item_count, &payload_words,
+                           &result_words);
     (void)dma_flags;
-    if (rc != MOL_TCP_OK ||
+    if (rc != MOL_TCP_OK || item_count != current_request.header.batch_size ||
         payload_words * 4U != current_request.payload_len) {
         send_request_error(&current_request, MOL_TCP_ERROR_INTERNAL,
                            (uint32_t)(-rc), 0U);
