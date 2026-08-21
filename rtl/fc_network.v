@@ -29,6 +29,8 @@ module fc_network #(
     input  wire [1:0]  cfg_layer,
     input  wire [15:0] cfg_addr,
     input  wire [DATA_WIDTH-1:0] cfg_wdata,
+    input  wire        cfg_bank,
+    input  wire        run_bank,
 
     output wire busy,
     output wire valid,
@@ -67,22 +69,24 @@ module fc_network #(
 
     (* ram_style = "block" *)
     reg signed [DATA_WIDTH-1:0] hidden_weights
-        [0:INPUT_DIM*HIDDEN_DIM-1];
-    reg signed [DATA_WIDTH-1:0] hidden_biases [0:HIDDEN_DIM-1];
+        [0:2*INPUT_DIM*HIDDEN_DIM-1];
+    reg signed [DATA_WIDTH-1:0] hidden_biases [0:2*HIDDEN_DIM-1];
     (* ram_style = "block" *)
     reg signed [DATA_WIDTH-1:0] output_weights
-        [0:HIDDEN_DIM*OUTPUT_DIM-1];
-    reg signed [DATA_WIDTH-1:0] output_biases [0:OUTPUT_DIM-1];
+        [0:2*HIDDEN_DIM*OUTPUT_DIM-1];
+    reg signed [DATA_WIDTH-1:0] output_biases [0:2*OUTPUT_DIM-1];
 
     reg signed [DATA_WIDTH-1:0] hidden_values [0:HIDDEN_DIM-1];
     reg [DATA_WIDTH-1:0] output_values [0:OUTPUT_DIM-1];
+    reg active_weight_bank;
 
     wire signed [DATA_WIDTH-1:0] selected_input =
         inputs[input_idx*DATA_WIDTH +: DATA_WIDTH];
     wire signed [DATA_WIDTH-1:0] selected_hidden_value =
         hidden_values[hidden_idx];
     wire signed [DATA_WIDTH-1:0] selected_output_weight =
-        output_weights[hidden_idx*OUTPUT_DIM + output_idx];
+        output_weights[(active_weight_bank ? HIDDEN_DIM*OUTPUT_DIM : 0) +
+                       hidden_idx*OUTPUT_DIM + output_idx];
 
     wire signed [2*DATA_WIDTH-1:0] output_product =
         selected_hidden_value * selected_output_weight;
@@ -160,16 +164,20 @@ module fc_network #(
     endfunction
 
     always @(posedge clk) begin
-        if (cfg_we && state == ST_IDLE) begin
+        if (cfg_we && (state == ST_IDLE || cfg_bank != active_weight_bank)) begin
             case (cfg_layer)
                 2'd0: if (cfg_addr < INPUT_DIM*HIDDEN_DIM)
-                    hidden_weights[cfg_addr] <= cfg_wdata;
+                    hidden_weights[(cfg_bank ? INPUT_DIM*HIDDEN_DIM : 0) +
+                                   cfg_addr] <= cfg_wdata;
                 2'd1: if (cfg_addr < HIDDEN_DIM)
-                    hidden_biases[cfg_addr] <= cfg_wdata;
+                    hidden_biases[(cfg_bank ? HIDDEN_DIM : 0) + cfg_addr] <=
+                        cfg_wdata;
                 2'd2: if (cfg_addr < HIDDEN_DIM*OUTPUT_DIM)
-                    output_weights[cfg_addr] <= cfg_wdata;
+                    output_weights[(cfg_bank ? HIDDEN_DIM*OUTPUT_DIM : 0) +
+                                   cfg_addr] <= cfg_wdata;
                 2'd3: if (cfg_addr < OUTPUT_DIM)
-                    output_biases[cfg_addr] <= cfg_wdata;
+                    output_biases[(cfg_bank ? OUTPUT_DIM : 0) + cfg_addr] <=
+                        cfg_wdata;
                 default: ;
             endcase
         end
@@ -184,6 +192,7 @@ module fc_network #(
             hidden_base <= {HIDDEN_IDX_W{1'b0}};
             output_idx  <= {OUTPUT_IDX_W{1'b0}};
             accumulator <= {ACC_WIDTH{1'b0}};
+            active_weight_bank <= 1'b0;
             hidden_mac_valid <= 1'b0;
             hidden_all_issued <= 1'b0;
             hidden_input_reg <= {DATA_WIDTH{1'b0}};
@@ -196,6 +205,7 @@ module fc_network #(
             case (state)
                 ST_IDLE: begin
                     if (start) begin
+                        active_weight_bank <= run_bank;
                         hidden_base <= {HIDDEN_IDX_W{1'b0}};
                         state       <= ST_HIDDEN_INIT;
                     end
@@ -211,10 +221,14 @@ module fc_network #(
                             hidden_accumulator[lane_idx] <=
                                 $signed({
                                     {(ACC_WIDTH-DATA_WIDTH){
-                                        hidden_biases[hidden_base + lane_idx]
+                                        hidden_biases[
+                                            (active_weight_bank ? HIDDEN_DIM : 0) +
+                                            hidden_base + lane_idx]
                                             [DATA_WIDTH-1]
                                     }},
-                                    hidden_biases[hidden_base + lane_idx]
+                                    hidden_biases[
+                                        (active_weight_bank ? HIDDEN_DIM : 0) +
+                                        hidden_base + lane_idx]
                                 }) <<< FRAC_BITS;
                         else
                             hidden_accumulator[lane_idx] <=
@@ -243,6 +257,8 @@ module fc_network #(
                             if (hidden_base + lane_idx < HIDDEN_DIM)
                                 hidden_weight_reg[lane_idx] <=
                                     hidden_weights[
+                                        (active_weight_bank ?
+                                         INPUT_DIM*HIDDEN_DIM : 0) +
                                         input_idx*HIDDEN_DIM + hidden_base +
                                         lane_idx
                                     ];
@@ -285,9 +301,13 @@ module fc_network #(
                     accumulator <=
                         $signed({
                             {(ACC_WIDTH-DATA_WIDTH){
-                                output_biases[output_idx][DATA_WIDTH-1]
+                                output_biases[
+                                    (active_weight_bank ? OUTPUT_DIM : 0) +
+                                    output_idx][DATA_WIDTH-1]
                             }},
-                            output_biases[output_idx]
+                            output_biases[
+                                (active_weight_bank ? OUTPUT_DIM : 0) +
+                                output_idx]
                         }) <<< FRAC_BITS;
                     state <= ST_OUTPUT_MAC;
                 end

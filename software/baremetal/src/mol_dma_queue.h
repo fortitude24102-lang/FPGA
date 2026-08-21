@@ -86,6 +86,14 @@ int mol_dma_builder_add_task(mol_dma_builder_t *builder, uint32_t job_id,
                              uint32_t payload_words,
                              uint32_t result_capacity_words);
 
+uint32_t mol_dma_crc32_words(const uint32_t *words, uint32_t word_count);
+
+int mol_dma_builder_add_weight_reload(mol_dma_builder_t *builder,
+                                      uint32_t job_id,
+                                      const uint32_t *words,
+                                      uint32_t word_count,
+                                      uint32_t timeout_cycles);
+
 int mol_dma_builder_finalize(mol_dma_builder_t *builder,
                              size_t *transfer_bytes);
 
@@ -96,6 +104,10 @@ int mol_dma_results_open(mol_dma_result_iterator_t *iterator,
 /* Returns 1 for a record, 0 at the trailer, or a negative mol_dma_rc_t. */
 int mol_dma_results_next(mol_dma_result_iterator_t *iterator,
                          mol_dma_result_view_t *view);
+
+int mol_dma_weight_reload_result(const mol_dma_result_view_t *view,
+                                 uint32_t *new_epoch,
+                                 uint32_t *observed_crc);
 
 /* Locate and validate a response inside a larger zero-filled S2MM buffer. */
 int mol_dma_find_response_bytes(const void *buffer, size_t capacity_bytes,

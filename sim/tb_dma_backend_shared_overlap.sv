@@ -33,6 +33,7 @@ module tb_dma_backend_shared_overlap;
         .task_valid(task_valid), .task_ready(task_ready),
         .task_id(8'd0), .task_flags(32'h00000400),
         .task_item_count(32'd64),
+        .task_user_tag(32'd0),
         .task_sequence(6'd0),
         .payload_valid(payload_valid), .payload_ready(payload_ready),
         .payload_data(32'hffff_ffff), .payload_last(payload_last),

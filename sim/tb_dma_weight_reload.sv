@@ -19,7 +19,9 @@ module tb_dma_weight_reload;
     wire [31:0] payload_data = {payload_high, payload_low};
 
     wire done_valid;
+    wire [23:0] done_status;
     wire [31:0] done_result_words;
+    wire [31:0] done_detail;
     wire result_valid;
     wire [31:0] result_data;
 
@@ -49,11 +51,12 @@ module tb_dma_weight_reload;
         .task_valid(task_valid), .task_ready(task_ready),
         .task_id(8'hFE), .task_flags(32'd0),
         .task_item_count(32'd1),
+        .task_user_tag(32'hb691_66e7),
         .task_sequence(6'd0),
         .payload_valid(payload_valid), .payload_ready(payload_ready),
         .payload_data(payload_data), .payload_last(payload_last),
-        .done_valid(done_valid), .done_ready(1'b1), .done_status(),
-        .done_result_words(done_result_words), .done_detail(),
+        .done_valid(done_valid), .done_ready(1'b1), .done_status(done_status),
+        .done_result_words(done_result_words), .done_detail(done_detail),
         .result_valid(result_valid), .result_ready(1'b1),
         .result_data(result_data), .abort(1'b0),
         .tanimoto_start(), .fingerprint_we(),
@@ -76,7 +79,8 @@ module tb_dma_weight_reload;
         .admet_cfg_model(admet_cfg_model),
         .admet_cfg_layer(admet_cfg_layer),
         .admet_cfg_addr(admet_cfg_addr),
-        .admet_cfg_wdata(admet_cfg_wdata)
+        .admet_cfg_wdata(admet_cfg_wdata),
+        .weight_cfg_bank(), .weight_run_bank()
     );
 
     always @(posedge clk) begin
@@ -104,6 +108,10 @@ module tb_dma_weight_reload;
             end
             if (done_valid && done_result_words != 1)
                 $fatal(1, "reload result size=%0d", done_result_words);
+            if (done_valid && (done_status != `MOL_DMA_STATUS_OK ||
+                               done_detail != 32'hb691_66e7))
+                $fatal(1, "reload CRC status=%h detail=%h",
+                       done_status, done_detail);
             if (result_valid) begin
                 seen_epoch <= result_data;
                 if (gnn_write_count != 8192 ||

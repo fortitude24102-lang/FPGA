@@ -17,8 +17,236 @@ module dma_result_bank (
     assign rdata = memory[raddr];
 endmodule
 
+module dma_weight_reload_controller #(
+    parameter integer FEATURE_DIM = 64,
+    parameter integer HIDDEN_DIM = 128
+) (
+    input  wire clk,
+    input  wire rst_n,
+    input  wire task_valid,
+    output wire task_ready,
+    input  wire [31:0] expected_crc,
+    input  wire payload_valid,
+    output wire payload_ready,
+    input  wire [31:0] payload_data,
+    input  wire payload_last,
+    output wire done_valid,
+    input  wire done_ready,
+    output wire [23:0] done_status,
+    output wire [31:0] done_result_words,
+    output wire [31:0] done_detail,
+    output wire result_valid,
+    input  wire result_ready,
+    output wire [31:0] result_data,
+    input  wire abort,
+    output reg  gnn_weight_we,
+    output reg  [(((FEATURE_DIM*HIDDEN_DIM) <= 1) ? 1 :
+                  $clog2(FEATURE_DIM*HIDDEN_DIM))-1:0] gnn_weight_addr,
+    output reg  [15:0] gnn_weight_wdata,
+    output reg  admet_cfg_we,
+    output reg  [1:0] admet_cfg_model,
+    output reg  [1:0] admet_cfg_layer,
+    output reg  [15:0] admet_cfg_addr,
+    output reg  [15:0] admet_cfg_wdata,
+    output reg  weight_cfg_bank,
+    output wire weight_run_bank
+);
+    localparam [2:0] ST_IDLE = 3'd0;
+    localparam [2:0] ST_LOAD = 3'd1;
+    localparam [2:0] ST_WRITE_LOW = 3'd2;
+    localparam [2:0] ST_WRITE_HIGH = 3'd3;
+    localparam [2:0] ST_DONE = 3'd4;
+    localparam [2:0] ST_RESULT = 3'd5;
+
+    reg [2:0] state;
+    reg [31:0] expected_crc_reg;
+    reg [31:0] crc_state;
+    reg [31:0] observed_crc;
+    reg [31:0] reload_word;
+    reg reload_word_last;
+    reg [13:0] reload_weight_index;
+    reg [1:0] reload_admet_model;
+    reg [1:0] reload_admet_layer;
+    reg [7:0] reload_admet_addr;
+    reg active_bank;
+    reg [31:0] reload_epoch;
+    reg reload_good;
+
+    function automatic [31:0] crc32_byte;
+        input [31:0] crc_in;
+        input [7:0] byte_value;
+        integer bit_index;
+        reg [31:0] crc;
+        begin
+            crc = crc_in ^ byte_value;
+            for (bit_index = 0; bit_index < 8; bit_index = bit_index + 1)
+                crc = crc[0] ? ((crc >> 1) ^ 32'hedb8_8320) : (crc >> 1);
+            crc32_byte = crc;
+        end
+    endfunction
+
+    function automatic [31:0] crc32_word;
+        input [31:0] crc_in;
+        input [31:0] word_value;
+        reg [31:0] crc;
+        begin
+            crc = crc32_byte(crc_in, word_value[7:0]);
+            crc = crc32_byte(crc, word_value[15:8]);
+            crc = crc32_byte(crc, word_value[23:16]);
+            crc32_word = crc32_byte(crc, word_value[31:24]);
+        end
+    endfunction
+
+    task advance_reload_address;
+        begin
+            reload_weight_index <= reload_weight_index + 1'b1;
+            if (reload_weight_index >= 14'd8192) begin
+                case (reload_admet_layer)
+                    2'd0: begin
+                        if (reload_admet_addr == 8'd199) begin
+                            reload_admet_layer <= 2'd1;
+                            reload_admet_addr <= 8'd0;
+                        end else begin
+                            reload_admet_addr <= reload_admet_addr + 1'b1;
+                        end
+                    end
+                    2'd1: begin
+                        if (reload_admet_addr == 8'd9) begin
+                            reload_admet_layer <= 2'd2;
+                            reload_admet_addr <= 8'd0;
+                        end else begin
+                            reload_admet_addr <= reload_admet_addr + 1'b1;
+                        end
+                    end
+                    2'd2: begin
+                        if (reload_admet_addr == 8'd9) begin
+                            reload_admet_layer <= 2'd3;
+                            reload_admet_addr <= 8'd0;
+                        end else begin
+                            reload_admet_addr <= reload_admet_addr + 1'b1;
+                        end
+                    end
+                    default: begin
+                        reload_admet_model <= reload_admet_model + 1'b1;
+                        reload_admet_layer <= 2'd0;
+                        reload_admet_addr <= 8'd0;
+                    end
+                endcase
+            end
+        end
+    endtask
+
+    task emit_reload_weight;
+        input [15:0] value;
+        begin
+            if (reload_weight_index < 14'd8192) begin
+                gnn_weight_we <= 1'b1;
+                gnn_weight_addr <= reload_weight_index[12:0];
+                gnn_weight_wdata <= value;
+            end else begin
+                admet_cfg_we <= 1'b1;
+                admet_cfg_model <= reload_admet_model;
+                admet_cfg_layer <= reload_admet_layer;
+                admet_cfg_addr <= {8'd0, reload_admet_addr};
+                admet_cfg_wdata <= value;
+            end
+            advance_reload_address();
+        end
+    endtask
+
+    assign task_ready = state == ST_IDLE;
+    assign payload_ready = state == ST_LOAD;
+    assign done_valid = state == ST_DONE;
+    assign done_status = reload_good ? 24'd0 : `MOL_DMA_STATUS_INTERNAL_ERROR;
+    assign done_result_words = 32'd1;
+    assign done_detail = observed_crc;
+    assign result_valid = state == ST_RESULT;
+    assign result_data = reload_epoch;
+    assign weight_run_bank = active_bank;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state <= ST_IDLE;
+            expected_crc_reg <= 0;
+            crc_state <= 32'hffff_ffff;
+            observed_crc <= 0;
+            reload_word <= 0;
+            reload_word_last <= 1'b0;
+            reload_weight_index <= 0;
+            reload_admet_model <= 0;
+            reload_admet_layer <= 0;
+            reload_admet_addr <= 0;
+            active_bank <= 1'b0;
+            weight_cfg_bank <= 1'b1;
+            reload_epoch <= 0;
+            reload_good <= 1'b0;
+            gnn_weight_we <= 1'b0;
+            gnn_weight_addr <= 0;
+            gnn_weight_wdata <= 0;
+            admet_cfg_we <= 1'b0;
+            admet_cfg_model <= 0;
+            admet_cfg_layer <= 0;
+            admet_cfg_addr <= 0;
+            admet_cfg_wdata <= 0;
+        end else begin
+            gnn_weight_we <= 1'b0;
+            admet_cfg_we <= 1'b0;
+            if (abort) begin
+                state <= ST_IDLE;
+                crc_state <= 32'hffff_ffff;
+                reload_good <= 1'b0;
+            end else begin
+                case (state)
+                    ST_IDLE: if (task_valid) begin
+                        expected_crc_reg <= expected_crc;
+                        crc_state <= 32'hffff_ffff;
+                        reload_weight_index <= 0;
+                        reload_admet_model <= 0;
+                        reload_admet_layer <= 0;
+                        reload_admet_addr <= 0;
+                        weight_cfg_bank <= ~active_bank;
+                        reload_good <= 1'b0;
+                        state <= ST_LOAD;
+                    end
+                    ST_LOAD: if (payload_valid) begin
+                        reload_word <= payload_data;
+                        reload_word_last <= payload_last;
+                        crc_state <= crc32_word(crc_state, payload_data);
+                        if (payload_last)
+                            observed_crc <=
+                                crc32_word(crc_state, payload_data) ^ 32'hffff_ffff;
+                        state <= ST_WRITE_LOW;
+                    end
+                    ST_WRITE_LOW: begin
+                        emit_reload_weight(reload_word[15:0]);
+                        state <= ST_WRITE_HIGH;
+                    end
+                    ST_WRITE_HIGH: begin
+                        emit_reload_weight(reload_word[31:16]);
+                        if (reload_word_last) begin
+                            reload_good <= observed_crc == expected_crc_reg;
+                            if (observed_crc == expected_crc_reg) begin
+                                active_bank <= weight_cfg_bank;
+                                reload_epoch <= reload_epoch + 1'b1;
+                            end
+                            state <= ST_DONE;
+                        end else begin
+                            state <= ST_LOAD;
+                        end
+                    end
+                    ST_DONE: if (done_ready)
+                        state <= ST_RESULT;
+                    ST_RESULT: if (result_ready)
+                        state <= ST_IDLE;
+                    default: state <= ST_IDLE;
+                endcase
+            end
+        end
+    end
+endmodule
+
 // Routes the single payload stream into three independent lane controllers.
-// The fourth controller is active only for Pipeline and weight reload, which
+// The fourth controller is active only for Pipeline, which
 // reserve all three numerical cores until their result stream has drained.
 module dma_accelerator_backend #(
     parameter integer MAX_NODES = 50,
@@ -33,6 +261,7 @@ module dma_accelerator_backend #(
     input  wire [7:0] task_id,
     input  wire [31:0] task_flags,
     input  wire [31:0] task_item_count,
+    input  wire [31:0] task_user_tag,
     input  wire [5:0] task_sequence,
     input  wire payload_valid,
     output wire payload_ready,
@@ -103,13 +332,16 @@ module dma_accelerator_backend #(
     output wire [1:0] admet_cfg_model,
     output wire [1:0] admet_cfg_layer,
     output wire [15:0] admet_cfg_addr,
-    output wire [15:0] admet_cfg_wdata
+    output wire [15:0] admet_cfg_wdata,
+    output wire weight_cfg_bank,
+    output wire weight_run_bank
 );
     localparam [2:0] ROUTE_NONE = 3'd0;
     localparam [2:0] ROUTE_TANI = 3'd1;
     localparam [2:0] ROUTE_GNN  = 3'd2;
     localparam [2:0] ROUTE_ADMET = 3'd3;
     localparam [2:0] ROUTE_EXCLUSIVE = 3'd4;
+    localparam [2:0] ROUTE_RELOAD = 3'd5;
 
     reg [2:0] ingress_route;
     reg [2:0] completion_owner;
@@ -121,6 +353,7 @@ module dma_accelerator_backend #(
     reg [5:0] gnn_sequence;
     reg [5:0] admet_sequence;
     reg [5:0] exclusive_sequence;
+    reg [5:0] reload_sequence;
 
     wire tani_task_ready, tani_payload_ready, tani_done_valid;
     wire [23:0] tani_done_status;
@@ -194,76 +427,92 @@ module dma_accelerator_backend #(
     wire [(((MAX_NODES*HIDDEN_DIM+1)/2 <= 1) ? 1 :
            $clog2((MAX_NODES*HIDDEN_DIM+1)/2))-1:0]
          exclusive_gnn_output_addr;
-    wire exclusive_gnn_weight_we;
-    wire [(((FEATURE_DIM*HIDDEN_DIM) <= 1) ? 1 :
-           $clog2(FEATURE_DIM*HIDDEN_DIM))-1:0] exclusive_gnn_weight_addr;
-    wire [15:0] exclusive_gnn_weight_wdata;
     wire exclusive_admet_start, exclusive_descriptor_we;
     wire [4:0] exclusive_descriptor_addr;
     wire [DATA_WIDTH-1:0] exclusive_descriptor_wdata;
     wire exclusive_admet_input_write_bank, exclusive_admet_input_run_bank;
-    wire exclusive_admet_cfg_we;
-    wire [1:0] exclusive_admet_cfg_model, exclusive_admet_cfg_layer;
-    wire [15:0] exclusive_admet_cfg_addr, exclusive_admet_cfg_wdata;
+
+    wire reload_task_ready_i, reload_payload_ready_i;
+    wire reload_done_valid_i;
+    wire [23:0] reload_done_status_i;
+    wire [31:0] reload_done_words_i, reload_done_detail_i;
+    wire reload_result_valid_i;
+    wire [31:0] reload_result_data_i;
+    wire reload_gnn_weight_we;
+    wire [(((FEATURE_DIM*HIDDEN_DIM) <= 1) ? 1 :
+           $clog2(FEATURE_DIM*HIDDEN_DIM))-1:0] reload_gnn_weight_addr;
+    wire [15:0] reload_gnn_weight_wdata;
+    wire reload_admet_cfg_we;
+    wire [1:0] reload_admet_cfg_model, reload_admet_cfg_layer;
+    wire [15:0] reload_admet_cfg_addr, reload_admet_cfg_wdata;
 
     wire all_lanes_idle = !tani_controller_busy[0] &&
                           !gnn_controller_busy[0] &&
                           !admet_controller_busy[0] &&
                           !tanimoto_busy && !gnn_busy && !admet_busy;
-    wire exclusive_request = task_id == `MOL_DMA_TASK_PIPELINE ||
-                             task_id == `MOL_DMA_TASK_WEIGHT_RELOAD;
+    wire exclusive_request = task_id == `MOL_DMA_TASK_PIPELINE;
+    wire reload_request = task_id == `MOL_DMA_TASK_WEIGHT_RELOAD;
     wire selected_lane_ready =
         (task_id == `MOL_DMA_TASK_TANIMOTO) ? tani_task_ready :
         (task_id == `MOL_DMA_TASK_GNN) ? gnn_task_ready_i :
         (task_id == `MOL_DMA_TASK_ADMET) ? admet_task_ready_i :
-        exclusive_request ? (all_lanes_idle && exclusive_task_ready_i) : 1'b0;
+        exclusive_request ? (all_lanes_idle && exclusive_task_ready_i) :
+        reload_request ? reload_task_ready_i : 1'b0;
 
-    assign task_ready = ingress_route == ROUTE_NONE && !exclusive_active &&
-                        selected_lane_ready;
+    assign task_ready = ingress_route == ROUTE_NONE && selected_lane_ready &&
+                        (reload_request || !exclusive_active);
     assign payload_ready =
         (ingress_route == ROUTE_TANI) ? tani_payload_ready :
         (ingress_route == ROUTE_GNN) ? gnn_payload_ready_i :
         (ingress_route == ROUTE_ADMET) ? admet_payload_ready_i :
-        (ingress_route == ROUTE_EXCLUSIVE) ? exclusive_payload_ready_i : 1'b0;
+        (ingress_route == ROUTE_EXCLUSIVE) ? exclusive_payload_ready_i :
+        (ingress_route == ROUTE_RELOAD) ? reload_payload_ready_i : 1'b0;
 
     wire owner_done_valid =
         (completion_owner == ROUTE_TANI) ? tani_done_valid :
         (completion_owner == ROUTE_GNN) ? gnn_done_valid_i :
         (completion_owner == ROUTE_ADMET) ? admet_done_valid_i :
-        (completion_owner == ROUTE_EXCLUSIVE) ? exclusive_done_valid_i : 1'b0;
+        (completion_owner == ROUTE_EXCLUSIVE) ? exclusive_done_valid_i :
+        (completion_owner == ROUTE_RELOAD) ? reload_done_valid_i : 1'b0;
     assign done_valid = !completion_results && owner_done_valid;
     assign done_status =
         (completion_owner == ROUTE_TANI) ? tani_done_status :
         (completion_owner == ROUTE_GNN) ? gnn_done_status_i :
         (completion_owner == ROUTE_ADMET) ? admet_done_status_i :
-        exclusive_done_status_i;
+        (completion_owner == ROUTE_EXCLUSIVE) ? exclusive_done_status_i :
+        reload_done_status_i;
     assign done_result_words =
         (completion_owner == ROUTE_TANI) ? tani_done_words :
         (completion_owner == ROUTE_GNN) ? gnn_done_words_i :
         (completion_owner == ROUTE_ADMET) ? admet_done_words_i :
-        exclusive_done_words_i;
+        (completion_owner == ROUTE_EXCLUSIVE) ? exclusive_done_words_i :
+        reload_done_words_i;
     assign done_detail =
         (completion_owner == ROUTE_TANI) ? tani_done_detail :
         (completion_owner == ROUTE_GNN) ? gnn_done_detail_i :
         (completion_owner == ROUTE_ADMET) ? admet_done_detail_i :
-        exclusive_done_detail_i;
+        (completion_owner == ROUTE_EXCLUSIVE) ? exclusive_done_detail_i :
+        reload_done_detail_i;
     assign done_sequence =
         (completion_owner == ROUTE_TANI) ? tani_sequence :
         (completion_owner == ROUTE_GNN) ? gnn_sequence :
         (completion_owner == ROUTE_ADMET) ? admet_sequence :
-        exclusive_sequence;
+        (completion_owner == ROUTE_EXCLUSIVE) ? exclusive_sequence :
+        reload_sequence;
 
     wire owner_result_valid =
         (completion_owner == ROUTE_TANI) ? tani_result_valid :
         (completion_owner == ROUTE_GNN) ? gnn_result_valid_i :
         (completion_owner == ROUTE_ADMET) ? admet_result_valid_i :
-        (completion_owner == ROUTE_EXCLUSIVE) ? exclusive_result_valid_i : 1'b0;
+        (completion_owner == ROUTE_EXCLUSIVE) ? exclusive_result_valid_i :
+        (completion_owner == ROUTE_RELOAD) ? reload_result_valid_i : 1'b0;
     assign result_valid = completion_results && owner_result_valid;
     assign result_data =
         (completion_owner == ROUTE_TANI) ? tani_result_data :
         (completion_owner == ROUTE_GNN) ? gnn_result_data_i :
         (completion_owner == ROUTE_ADMET) ? admet_result_data_i :
-        exclusive_result_data_i;
+        (completion_owner == ROUTE_EXCLUSIVE) ? exclusive_result_data_i :
+        reload_result_data_i;
 
     wire tani_done_ready = completion_owner == ROUTE_TANI &&
                            !completion_results && done_ready;
@@ -272,7 +521,9 @@ module dma_accelerator_backend #(
     wire admet_done_ready_i = completion_owner == ROUTE_ADMET &&
                               !completion_results && done_ready;
     wire exclusive_done_ready_i = completion_owner == ROUTE_EXCLUSIVE &&
-                                  !completion_results && done_ready;
+                                   !completion_results && done_ready;
+    wire reload_done_ready_i = completion_owner == ROUTE_RELOAD &&
+                               !completion_results && done_ready;
     wire tani_result_ready = completion_owner == ROUTE_TANI &&
                              completion_results && result_ready;
     wire gnn_result_ready_i = completion_owner == ROUTE_GNN &&
@@ -280,7 +531,9 @@ module dma_accelerator_backend #(
     wire admet_result_ready_i = completion_owner == ROUTE_ADMET &&
                                 completion_results && result_ready;
     wire exclusive_result_ready_i = completion_owner == ROUTE_EXCLUSIVE &&
-                                    completion_results && result_ready;
+                                     completion_results && result_ready;
+    wire reload_result_ready_i = completion_owner == ROUTE_RELOAD &&
+                                 completion_results && result_ready;
 
     assign engine_busy = exclusive_active ? 3'b111 :
         {admet_controller_busy[0], gnn_controller_busy[0],
@@ -329,9 +582,9 @@ module dma_accelerator_backend #(
                            gnn_output_re_i;
     assign gnn_output_addr = exclusive_active ? exclusive_gnn_output_addr :
                              gnn_output_addr_i;
-    assign gnn_weight_we = exclusive_gnn_weight_we;
-    assign gnn_weight_addr = exclusive_gnn_weight_addr;
-    assign gnn_weight_wdata = exclusive_gnn_weight_wdata;
+    assign gnn_weight_we = reload_gnn_weight_we;
+    assign gnn_weight_addr = reload_gnn_weight_addr;
+    assign gnn_weight_wdata = reload_gnn_weight_wdata;
     assign descriptor_we = exclusive_active ? exclusive_descriptor_we :
                            admet_descriptor_we_i;
     assign descriptor_addr = exclusive_active ? exclusive_descriptor_addr :
@@ -342,11 +595,11 @@ module dma_accelerator_backend #(
         exclusive_admet_input_write_bank : admet_input_write_bank_i;
     assign admet_input_run_bank = exclusive_active ?
         exclusive_admet_input_run_bank : admet_input_run_bank_i;
-    assign admet_cfg_we = exclusive_admet_cfg_we;
-    assign admet_cfg_model = exclusive_admet_cfg_model;
-    assign admet_cfg_layer = exclusive_admet_cfg_layer;
-    assign admet_cfg_addr = exclusive_admet_cfg_addr;
-    assign admet_cfg_wdata = exclusive_admet_cfg_wdata;
+    assign admet_cfg_we = reload_admet_cfg_we;
+    assign admet_cfg_model = reload_admet_cfg_model;
+    assign admet_cfg_layer = reload_admet_cfg_layer;
+    assign admet_cfg_addr = reload_admet_cfg_addr;
+    assign admet_cfg_wdata = reload_admet_cfg_wdata;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -360,6 +613,7 @@ module dma_accelerator_backend #(
             gnn_sequence <= 0;
             admet_sequence <= 0;
             exclusive_sequence <= 0;
+            reload_sequence <= 0;
         end else if (abort) begin
             ingress_route <= ROUTE_NONE;
             completion_owner <= ROUTE_NONE;
@@ -378,6 +632,9 @@ module dma_accelerator_backend #(
                 end else if (task_id == `MOL_DMA_TASK_ADMET) begin
                     ingress_route <= ROUTE_ADMET;
                     admet_sequence <= task_sequence;
+                end else if (task_id == `MOL_DMA_TASK_WEIGHT_RELOAD) begin
+                    ingress_route <= ROUTE_RELOAD;
+                    reload_sequence <= task_sequence;
                 end else begin
                     ingress_route <= ROUTE_EXCLUSIVE;
                     exclusive_sequence <= task_sequence;
@@ -398,6 +655,8 @@ module dma_accelerator_backend #(
                             completion_owner <= ROUTE_ADMET;
                         else if (exclusive_done_valid_i)
                             completion_owner <= ROUTE_EXCLUSIVE;
+                        else if (reload_done_valid_i)
+                            completion_owner <= ROUTE_RELOAD;
                     end
                     ROUTE_GNN: begin
                         if (gnn_done_valid_i)
@@ -406,6 +665,8 @@ module dma_accelerator_backend #(
                             completion_owner <= ROUTE_ADMET;
                         else if (exclusive_done_valid_i)
                             completion_owner <= ROUTE_EXCLUSIVE;
+                        else if (reload_done_valid_i)
+                            completion_owner <= ROUTE_RELOAD;
                         else if (tani_done_valid)
                             completion_owner <= ROUTE_TANI;
                     end
@@ -414,14 +675,18 @@ module dma_accelerator_backend #(
                             completion_owner <= ROUTE_ADMET;
                         else if (exclusive_done_valid_i)
                             completion_owner <= ROUTE_EXCLUSIVE;
+                        else if (reload_done_valid_i)
+                            completion_owner <= ROUTE_RELOAD;
                         else if (tani_done_valid)
                             completion_owner <= ROUTE_TANI;
                         else if (gnn_done_valid_i)
                             completion_owner <= ROUTE_GNN;
                     end
-                    default: begin
+                    ROUTE_EXCLUSIVE: begin
                         if (exclusive_done_valid_i)
                             completion_owner <= ROUTE_EXCLUSIVE;
+                        else if (reload_done_valid_i)
+                            completion_owner <= ROUTE_RELOAD;
                         else if (tani_done_valid)
                             completion_owner <= ROUTE_TANI;
                         else if (gnn_done_valid_i)
@@ -429,12 +694,25 @@ module dma_accelerator_backend #(
                         else if (admet_done_valid_i)
                             completion_owner <= ROUTE_ADMET;
                     end
+                    default: begin
+                        if (reload_done_valid_i)
+                            completion_owner <= ROUTE_RELOAD;
+                        else if (tani_done_valid)
+                            completion_owner <= ROUTE_TANI;
+                        else if (gnn_done_valid_i)
+                            completion_owner <= ROUTE_GNN;
+                        else if (admet_done_valid_i)
+                            completion_owner <= ROUTE_ADMET;
+                        else if (exclusive_done_valid_i)
+                            completion_owner <= ROUTE_EXCLUSIVE;
+                    end
                 endcase
             end else if (!completion_results && done_valid && done_ready) begin
                 case (completion_owner)
                     ROUTE_TANI: completion_next <= ROUTE_GNN;
                     ROUTE_GNN: completion_next <= ROUTE_ADMET;
                     ROUTE_ADMET: completion_next <= ROUTE_EXCLUSIVE;
+                    ROUTE_EXCLUSIVE: completion_next <= ROUTE_RELOAD;
                     default: completion_next <= ROUTE_TANI;
                 endcase
                 if (done_result_words == 0) begin
@@ -492,13 +770,10 @@ module dma_accelerator_backend #(
         .gnn_adjacency_addr(), .gnn_adjacency_wdata(),
         .gnn_adjacency_wstrb(), .gnn_output_re(), .gnn_output_addr(),
         .gnn_output_rdata(32'd0), .gnn_busy(1'b0), .gnn_valid(1'b0),
-        .gnn_weight_we(), .gnn_weight_addr(), .gnn_weight_wdata(),
         .admet_start(), .admet_input_write_bank(), .admet_input_run_bank(),
         .descriptor_we(), .descriptor_addr(),
         .descriptor_wdata(), .admet_busy(1'b0), .admet_valid(1'b0),
-        .admet_predictions({4*DATA_WIDTH{1'b0}}), .admet_cfg_we(),
-        .admet_cfg_model(), .admet_cfg_layer(), .admet_cfg_addr(),
-        .admet_cfg_wdata()
+        .admet_predictions({4*DATA_WIDTH{1'b0}})
     );
 
     dma_accelerator_lane_controller #(
@@ -536,13 +811,10 @@ module dma_accelerator_backend #(
         .gnn_adjacency_wstrb(gnn_adjacency_wstrb_i),
         .gnn_output_re(gnn_output_re_i), .gnn_output_addr(gnn_output_addr_i),
         .gnn_output_rdata(gnn_output_rdata), .gnn_busy(gnn_busy),
-        .gnn_valid(gnn_valid), .gnn_weight_we(), .gnn_weight_addr(),
-        .gnn_weight_wdata(), .admet_start(), .admet_input_write_bank(),
+        .gnn_valid(gnn_valid), .admet_start(), .admet_input_write_bank(),
         .admet_input_run_bank(), .descriptor_we(),
         .descriptor_addr(), .descriptor_wdata(), .admet_busy(1'b0),
-        .admet_valid(1'b0), .admet_predictions({4*DATA_WIDTH{1'b0}}),
-        .admet_cfg_we(), .admet_cfg_model(), .admet_cfg_layer(),
-        .admet_cfg_addr(), .admet_cfg_wdata()
+        .admet_valid(1'b0), .admet_predictions({4*DATA_WIDTH{1'b0}})
     );
 
     dma_accelerator_lane_controller #(
@@ -573,7 +845,6 @@ module dma_accelerator_backend #(
         .gnn_adjacency_we(), .gnn_adjacency_addr(), .gnn_adjacency_wdata(),
         .gnn_adjacency_wstrb(), .gnn_output_re(), .gnn_output_addr(),
         .gnn_output_rdata(32'd0), .gnn_busy(1'b0), .gnn_valid(1'b0),
-        .gnn_weight_we(), .gnn_weight_addr(), .gnn_weight_wdata(),
         .admet_start(admet_start_i),
         .admet_input_write_bank(admet_input_write_bank_i),
         .admet_input_run_bank(admet_input_run_bank_i),
@@ -581,9 +852,7 @@ module dma_accelerator_backend #(
         .descriptor_addr(admet_descriptor_addr_i),
         .descriptor_wdata(admet_descriptor_wdata_i),
         .admet_busy(admet_busy), .admet_valid(admet_valid),
-        .admet_predictions(admet_predictions), .admet_cfg_we(),
-        .admet_cfg_model(), .admet_cfg_layer(), .admet_cfg_addr(),
-        .admet_cfg_wdata()
+        .admet_predictions(admet_predictions)
     );
 
     dma_accelerator_lane_controller #(
@@ -629,9 +898,7 @@ module dma_accelerator_backend #(
         .gnn_output_re(exclusive_gnn_output_re),
         .gnn_output_addr(exclusive_gnn_output_addr),
         .gnn_output_rdata(gnn_output_rdata), .gnn_busy(gnn_busy),
-        .gnn_valid(gnn_valid), .gnn_weight_we(exclusive_gnn_weight_we),
-        .gnn_weight_addr(exclusive_gnn_weight_addr),
-        .gnn_weight_wdata(exclusive_gnn_weight_wdata),
+        .gnn_valid(gnn_valid),
         .admet_start(exclusive_admet_start),
         .admet_input_write_bank(exclusive_admet_input_write_bank),
         .admet_input_run_bank(exclusive_admet_input_run_bank),
@@ -639,12 +906,32 @@ module dma_accelerator_backend #(
         .descriptor_addr(exclusive_descriptor_addr),
         .descriptor_wdata(exclusive_descriptor_wdata),
         .admet_busy(admet_busy), .admet_valid(admet_valid),
-        .admet_predictions(admet_predictions),
-        .admet_cfg_we(exclusive_admet_cfg_we),
-        .admet_cfg_model(exclusive_admet_cfg_model),
-        .admet_cfg_layer(exclusive_admet_cfg_layer),
-        .admet_cfg_addr(exclusive_admet_cfg_addr),
-        .admet_cfg_wdata(exclusive_admet_cfg_wdata)
+        .admet_predictions(admet_predictions)
+    );
+
+    dma_weight_reload_controller #(
+        .FEATURE_DIM(FEATURE_DIM), .HIDDEN_DIM(HIDDEN_DIM)
+    ) reload_controller (
+        .clk(clk), .rst_n(rst_n),
+        .task_valid(task_valid && task_ready && reload_request),
+        .task_ready(reload_task_ready_i), .expected_crc(task_user_tag),
+        .payload_valid(payload_valid && ingress_route == ROUTE_RELOAD),
+        .payload_ready(reload_payload_ready_i), .payload_data(payload_data),
+        .payload_last(payload_last), .done_valid(reload_done_valid_i),
+        .done_ready(reload_done_ready_i), .done_status(reload_done_status_i),
+        .done_result_words(reload_done_words_i),
+        .done_detail(reload_done_detail_i),
+        .result_valid(reload_result_valid_i),
+        .result_ready(reload_result_ready_i), .result_data(reload_result_data_i),
+        .abort(abort), .gnn_weight_we(reload_gnn_weight_we),
+        .gnn_weight_addr(reload_gnn_weight_addr),
+        .gnn_weight_wdata(reload_gnn_weight_wdata),
+        .admet_cfg_we(reload_admet_cfg_we),
+        .admet_cfg_model(reload_admet_cfg_model),
+        .admet_cfg_layer(reload_admet_cfg_layer),
+        .admet_cfg_addr(reload_admet_cfg_addr),
+        .admet_cfg_wdata(reload_admet_cfg_wdata),
+        .weight_cfg_bank(weight_cfg_bank), .weight_run_bank(weight_run_bank)
     );
 endmodule
 
@@ -721,11 +1008,6 @@ module dma_accelerator_lane_controller #(
     input  wire gnn_busy,
     input  wire gnn_valid,
 
-    output reg         gnn_weight_we,
-    output reg [(((FEATURE_DIM*HIDDEN_DIM) <= 1) ? 1 :
-                 $clog2(FEATURE_DIM*HIDDEN_DIM))-1:0] gnn_weight_addr,
-    output reg [15:0]  gnn_weight_wdata,
-
     output wire admet_start,
     output wire admet_input_write_bank,
     output wire admet_input_run_bank,
@@ -734,13 +1016,7 @@ module dma_accelerator_lane_controller #(
     output reg  [DATA_WIDTH-1:0] descriptor_wdata,
     input  wire admet_busy,
     input  wire admet_valid,
-    input  wire [4*DATA_WIDTH-1:0] admet_predictions,
-
-    output reg         admet_cfg_we,
-    output reg [1:0]   admet_cfg_model,
-    output reg [1:0]   admet_cfg_layer,
-    output reg [15:0]  admet_cfg_addr,
-    output reg [15:0]  admet_cfg_wdata
+    input  wire [4*DATA_WIDTH-1:0] admet_predictions
 );
     localparam integer GNN_FEATURE_WORDS = (MAX_NODES*FEATURE_DIM+1)/2;
     localparam integer GNN_ADJ_WORDS = (MAX_NODES*MAX_NODES+31)/32;
@@ -763,8 +1039,6 @@ module dma_accelerator_lane_controller #(
     localparam [3:0] ST_RESULT        = 4'd10;
     localparam [3:0] ST_GNN_READ_WAIT = 4'd11;
     localparam [3:0] ST_START_TANI    = 4'd12;
-    localparam [3:0] ST_RELOAD_LOW    = 4'd13;
-    localparam [3:0] ST_RELOAD_HIGH   = 4'd14;
     localparam [23:0] STATUS_INTERNAL_ERROR =
         `MOL_DMA_STATUS_INTERNAL_ERROR;
 
@@ -779,14 +1053,6 @@ module dma_accelerator_lane_controller #(
     reg [31:0] result_data_reg;
     reg result_valid_reg;
     reg [1:0] gnn_read_wait;
-    reg [31:0] reload_word;
-    reg reload_word_last;
-    reg [13:0] reload_weight_index;
-    reg [31:0] reload_epoch;
-    reg [1:0] reload_admet_model;
-    reg [1:0] reload_admet_layer;
-    reg [7:0] reload_admet_addr;
-
     reg [31:0] tanimoto_result;
     reg [2:0] pipeline_done_mask;
     reg [1:0] input_bank_occupied;
@@ -872,63 +1138,6 @@ module dma_accelerator_lane_controller #(
     assign engine_start = {admet_start_reg, gnn_start_reg,
                            tanimoto_start_reg};
     assign engine_done = {admet_valid, gnn_valid, tanimoto_valid};
-
-    task advance_reload_address;
-        begin
-            reload_weight_index <= reload_weight_index + 1'b1;
-            if (reload_weight_index >= 14'd8192) begin
-                case (reload_admet_layer)
-                    2'd0: begin
-                        if (reload_admet_addr == 8'd199) begin
-                            reload_admet_layer <= 2'd1;
-                            reload_admet_addr <= 8'd0;
-                        end else begin
-                            reload_admet_addr <= reload_admet_addr + 1'b1;
-                        end
-                    end
-                    2'd1: begin
-                        if (reload_admet_addr == 8'd9) begin
-                            reload_admet_layer <= 2'd2;
-                            reload_admet_addr <= 8'd0;
-                        end else begin
-                            reload_admet_addr <= reload_admet_addr + 1'b1;
-                        end
-                    end
-                    2'd2: begin
-                        if (reload_admet_addr == 8'd9) begin
-                            reload_admet_layer <= 2'd3;
-                            reload_admet_addr <= 8'd0;
-                        end else begin
-                            reload_admet_addr <= reload_admet_addr + 1'b1;
-                        end
-                    end
-                    default: begin
-                        reload_admet_model <= reload_admet_model + 1'b1;
-                        reload_admet_layer <= 2'd0;
-                        reload_admet_addr <= 8'd0;
-                    end
-                endcase
-            end
-        end
-    endtask
-
-    task emit_reload_weight;
-        input [15:0] value;
-        begin
-            if (reload_weight_index < 14'd8192) begin
-                gnn_weight_we <= 1'b1;
-                gnn_weight_addr <= reload_weight_index[12:0];
-                gnn_weight_wdata <= value;
-            end else begin
-                admet_cfg_we <= 1'b1;
-                admet_cfg_model <= reload_admet_model;
-                admet_cfg_layer <= reload_admet_layer;
-                admet_cfg_addr <= {8'd0, reload_admet_addr};
-                admet_cfg_wdata <= value;
-            end
-            advance_reload_address();
-        end
-    endtask
 
     function is_gnn_result_word;
         input [7:0] id;
@@ -1051,21 +1260,6 @@ module dma_accelerator_lane_controller #(
             descriptor_addr <= 0;
             descriptor_wdata <= 0;
             shared_result_count <= 0;
-            reload_word <= 0;
-            reload_word_last <= 0;
-            reload_weight_index <= 0;
-            reload_epoch <= 0;
-            reload_admet_model <= 0;
-            reload_admet_layer <= 0;
-            reload_admet_addr <= 0;
-            gnn_weight_we <= 0;
-            gnn_weight_addr <= 0;
-            gnn_weight_wdata <= 0;
-            admet_cfg_we <= 0;
-            admet_cfg_model <= 0;
-            admet_cfg_layer <= 0;
-            admet_cfg_addr <= 0;
-            admet_cfg_wdata <= 0;
         end else begin
             tanimoto_start_reg <= 1'b0;
             gnn_start_reg <= 1'b0;
@@ -1075,8 +1269,6 @@ module dma_accelerator_lane_controller #(
             gnn_output_re_reg <= 1'b0;
             fingerprint_we <= 1'b0;
             descriptor_we <= 1'b0;
-            gnn_weight_we <= 1'b0;
-            admet_cfg_we <= 1'b0;
 
             if (abort) begin
                 state <= ST_IDLE;
@@ -1193,10 +1385,6 @@ module dma_accelerator_lane_controller #(
                             payload_index <= 0;
                             admet_item_index <= 0;
                             shared_result_count <= 0;
-                            reload_weight_index <= 0;
-                            reload_admet_model <= 0;
-                            reload_admet_layer <= 0;
-                            reload_admet_addr <= 0;
                             pipeline_done_mask <= 3'b000;
                             input_bank_occupied <= 2'b00;
                             input_bank_ready <= 2'b00;
@@ -1360,29 +1548,8 @@ module dma_accelerator_lane_controller #(
                                             item_payload_index + 1'b1;
                                     end
                                 end
-                                `MOL_DMA_TASK_WEIGHT_RELOAD: begin
-                                    reload_word <= payload_data;
-                                    reload_word_last <= payload_last;
-                                    state <= ST_RELOAD_LOW;
-                                end
                                 default: state <= ST_IDLE;
                             endcase
-                        end
-                    end
-
-                    ST_RELOAD_LOW: begin
-                        emit_reload_weight(reload_word[15:0]);
-                        state <= ST_RELOAD_HIGH;
-                    end
-
-                    ST_RELOAD_HIGH: begin
-                        emit_reload_weight(reload_word[31:16]);
-                        if (reload_word_last) begin
-                            reload_epoch <= reload_epoch + 1'b1;
-                            result_words_reg <= 1;
-                            state <= ST_DONE;
-                        end else begin
-                            state <= ST_LOAD;
                         end
                     end
 
@@ -1460,9 +1627,6 @@ module dma_accelerator_lane_controller #(
                                 else if (active_task == `MOL_DMA_TASK_GNN)
                                     result_data_reg <=
                                         gnn_item_result[result_index[4:0]];
-                                else if (active_task ==
-                                         `MOL_DMA_TASK_WEIGHT_RELOAD)
-                                    result_data_reg <= reload_epoch;
                                 else if (active_task == `MOL_DMA_TASK_PIPELINE &&
                                          full_gnn && result_index == 0)
                                     result_data_reg <= tanimoto_item_result[0];

@@ -107,6 +107,8 @@ module gnn_message_passing #(
     input  wire weight_we,
     input  wire [$clog2(FEATURE_DIM*HIDDEN_DIM)-1:0] weight_addr,
     input  wire [DATA_WIDTH-1:0] weight_wdata,
+    input  wire cfg_bank,
+    input  wire run_bank,
     output wire busy,
     output wire valid
 );
@@ -151,6 +153,9 @@ module gnn_message_passing #(
         (FEATURE_MEMORY_DEPTH <= 1) ? 1 : $clog2(FEATURE_MEMORY_DEPTH);
     localparam integer WEIGHT_BANK_ADDR_W =
         (WEIGHT_BANK_DEPTH <= 1) ? 1 : $clog2(WEIGHT_BANK_DEPTH);
+    localparam integer WEIGHT_MEMORY_DEPTH = WEIGHT_BANK_DEPTH * 2;
+    localparam integer WEIGHT_MEMORY_ADDR_W =
+        (WEIGHT_MEMORY_DEPTH <= 1) ? 1 : $clog2(WEIGHT_MEMORY_DEPTH);
     localparam integer OUTPUT_BANK_ADDR_W =
         (OUTPUT_BANK_DEPTH <= 1) ? 1 : $clog2(OUTPUT_BANK_DEPTH);
     localparam integer FEATURE_ELEMENT_ADDR_W =
@@ -280,13 +285,17 @@ module gnn_message_passing #(
         weight_load_hidden / HID_LANES;
     wire [MAC_FEATURE_GROUP_W-1:0] weight_load_feature_group =
         weight_load_feature / MAC_FEAT_LANES;
-    wire [WEIGHT_BANK_ADDR_W-1:0] weight_write_addr =
-        weight_load_hidden_group*MAC_FEATURE_GROUPS +
-        weight_load_feature_group;
+    wire [WEIGHT_BANK_ADDR_W-1:0] weight_write_logical_addr =
+        weight_load_hidden_group*MAC_FEATURE_GROUPS + weight_load_feature_group;
+    wire [WEIGHT_MEMORY_ADDR_W-1:0] weight_write_addr =
+        weight_write_logical_addr + (cfg_bank ? WEIGHT_BANK_DEPTH : 0);
 
     reg [MAC_FEATURE_GROUP_W-1:0] mac_feature_group_issue;
-    wire [WEIGHT_BANK_ADDR_W-1:0] weight_read_addr =
+    wire [WEIGHT_BANK_ADDR_W-1:0] weight_read_logical_addr =
         hidden_group_idx*MAC_FEATURE_GROUPS + mac_feature_group_issue;
+    wire [WEIGHT_MEMORY_ADDR_W-1:0] weight_read_addr =
+        weight_read_logical_addr +
+        (active_weight_bank ? WEIGHT_BANK_DEPTH : 0);
     wire [TOTAL_MAC_BANKS*DATA_WIDTH-1:0] weight_bank_rdata_bus;
 
     genvar weight_bank;
@@ -297,13 +306,14 @@ module gnn_message_passing #(
                 weight_bank / MAC_FEAT_LANES;
             localparam integer THIS_FEATURE_LANE =
                 weight_bank % MAC_FEAT_LANES;
-            wire bank_we = weight_we && state == ST_IDLE &&
+            wire bank_we = weight_we &&
+                (state == ST_IDLE || cfg_bank != active_weight_bank) &&
                 (weight_load_hidden % HID_LANES) == THIS_HIDDEN_LANE &&
                 (weight_load_feature % MAC_FEAT_LANES) == THIS_FEATURE_LANE;
             gnn_dist_bank #(
                 .WIDTH(DATA_WIDTH),
-                .DEPTH(WEIGHT_BANK_DEPTH),
-                .ADDR_WIDTH(WEIGHT_BANK_ADDR_W)
+                .DEPTH(WEIGHT_MEMORY_DEPTH),
+                .ADDR_WIDTH(WEIGHT_MEMORY_ADDR_W)
             ) bank (
                 .clk(clk),
                 .we(bank_we),
@@ -317,6 +327,7 @@ module gnn_message_passing #(
         end
     endgenerate
 
+    reg active_weight_bank;
     reg signed [AGG_WIDTH-1:0] aggregate_feature [0:FEATURE_DIM-1];
     reg aggregate_all_issued;
     reg aggregate_read_valid;
@@ -460,6 +471,7 @@ module gnn_message_passing #(
         if (!rst_n) begin
             state                    <= ST_IDLE;
             active_input_bank        <= 1'b0;
+            active_weight_bank       <= 1'b0;
             node_idx                 <= {NODE_IDX_W{1'b0}};
             hidden_group_idx         <= {HIDDEN_GROUP_W{1'b0}};
             aggregate_neighbor_issue <= {NODE_IDX_W{1'b0}};
@@ -483,6 +495,7 @@ module gnn_message_passing #(
                 ST_IDLE: begin
                     if (start) begin
                         active_input_bank <= input_run_bank;
+                        active_weight_bank <= run_bank;
                         node_idx         <= {NODE_IDX_W{1'b0}};
                         hidden_group_idx <= {HIDDEN_GROUP_W{1'b0}};
                         state            <= ST_CLEAR_AGG;

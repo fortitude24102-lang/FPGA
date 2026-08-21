@@ -433,6 +433,8 @@ module generator_accelerator_top #(
     wire [1:0] dma_admet_cfg_layer;
     wire [15:0] dma_admet_cfg_addr;
     wire [DATA_WIDTH-1:0] dma_admet_cfg_wdata;
+    wire dma_weight_cfg_bank;
+    wire dma_weight_run_bank;
 
     wire core_tanimoto_start = dma_active ? dma_tanimoto_start : tanimoto_start;
     wire core_gnn_start = dma_active ? dma_gnn_start : gnn_start;
@@ -473,6 +475,8 @@ module generator_accelerator_top #(
         dma_active ? dma_admet_cfg_addr : admet_cfg_addr;
     wire [DATA_WIDTH-1:0] core_admet_cfg_wdata =
         dma_active ? dma_admet_cfg_wdata : admet_weight_data_reg;
+    wire core_weight_cfg_bank = dma_active ? dma_weight_cfg_bank : 1'b0;
+    wire core_weight_run_bank = dma_active ? dma_weight_run_bank : 1'b0;
 
     tanimoto_accelerator u_tanimoto (
         .clk(s_axi_aclk),
@@ -514,6 +518,8 @@ module generator_accelerator_top #(
         .weight_we(core_gnn_weight_we),
         .weight_addr(core_gnn_weight_addr),
         .weight_wdata(core_gnn_weight_wdata),
+        .cfg_bank(core_weight_cfg_bank),
+        .run_bank(core_weight_run_bank),
         .busy(gnn_busy),
         .valid(gnn_valid)
     );
@@ -534,6 +540,8 @@ module generator_accelerator_top #(
         .cfg_layer(core_admet_cfg_layer),
         .cfg_addr(core_admet_cfg_addr),
         .cfg_wdata(core_admet_cfg_wdata),
+        .cfg_bank(core_weight_cfg_bank),
+        .run_bank(core_weight_run_bank),
         .busy(admet_busy),
         .valid(admet_valid),
         .logp(logp),
@@ -652,6 +660,7 @@ module generator_accelerator_top #(
     wire [7:0] backend_task_id;
     wire [31:0] backend_task_flags;
     wire [31:0] backend_task_item_count;
+    wire [31:0] backend_task_user_tag;
     wire [31:0] backend_task_timeout_cycles;
     wire [5:0] backend_task_sequence;
     wire backend_payload_valid;
@@ -718,6 +727,7 @@ module generator_accelerator_top #(
         .backend_task_ready(backend_task_ready),
         .backend_task_id(backend_task_id), .backend_task_flags(backend_task_flags),
         .backend_task_item_count(backend_task_item_count),
+        .backend_task_user_tag(backend_task_user_tag),
         .backend_task_timeout_cycles(backend_task_timeout_cycles),
         .backend_task_sequence(backend_task_sequence),
         .backend_payload_valid(backend_payload_valid),
@@ -799,6 +809,7 @@ module generator_accelerator_top #(
         .task_valid(backend_task_valid), .task_ready(backend_task_ready),
         .task_id(backend_task_id), .task_flags(backend_task_flags),
         .task_item_count(backend_task_item_count),
+        .task_user_tag(backend_task_user_tag),
         .task_sequence(backend_task_sequence),
         .payload_valid(backend_payload_valid),
         .payload_ready(backend_payload_ready),
@@ -851,7 +862,9 @@ module generator_accelerator_top #(
         .admet_cfg_model(dma_admet_cfg_model),
         .admet_cfg_layer(dma_admet_cfg_layer),
         .admet_cfg_addr(dma_admet_cfg_addr),
-        .admet_cfg_wdata(dma_admet_cfg_wdata)
+        .admet_cfg_wdata(dma_admet_cfg_wdata),
+        .weight_cfg_bank(dma_weight_cfg_bank),
+        .weight_run_bank(dma_weight_run_bank)
     );
 
     always @(posedge s_axi_aclk or negedge s_axi_aresetn) begin

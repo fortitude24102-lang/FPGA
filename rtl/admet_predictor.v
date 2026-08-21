@@ -20,6 +20,8 @@ module admet_predictor #(
     input  wire [1:0]  cfg_layer,
     input  wire [15:0] cfg_addr,
     input  wire [DATA_WIDTH-1:0] cfg_wdata,
+    input  wire        cfg_bank,
+    input  wire        run_bank,
 
     output wire busy,
     output wire valid,
@@ -53,6 +55,8 @@ module admet_predictor #(
                 .cfg_layer(cfg_layer),
                 .cfg_addr(cfg_addr),
                 .cfg_wdata(cfg_wdata),
+                .cfg_bank(cfg_bank),
+                .run_bank(run_bank),
                 .busy(model_busy[model_idx]),
                 .valid(model_valid[model_idx]),
                 .outputs(

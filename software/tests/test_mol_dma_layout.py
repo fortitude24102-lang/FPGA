@@ -9,6 +9,7 @@ import struct
 import subprocess
 import tempfile
 import unittest
+import zlib
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -372,7 +373,7 @@ class MolDmaLayoutTests(unittest.TestCase):
         total_words = 8 + 8 + 1 + 8
         frame_words = [
             MOLR, VERSION_HEADER, 0xFEED0001, 1, 0, total_words, 0, 0,
-            9, WEIGHT_RELOAD, 1, 100, 0, 1, 0xCAFE, 0, 7,
+            9, WEIGHT_RELOAD, 1, 100, 0, 1, 0xCAFE, 0xCAFE, 7,
             MOLE, 0xFEED0001, 1, 0, total_words, 0, 0xFFFFFFFF, 0,
         ]
         frame = struct.pack(f"<{len(frame_words)}I", *frame_words)
@@ -392,6 +393,82 @@ class MolDmaLayoutTests(unittest.TestCase):
         )
         self.assertEqual((view.task_id, view.result_words), (WEIGHT_RELOAD, 1))
         self.assertEqual(ctypes.c_uint32.from_address(view.payload).value, 7)
+        parse_reload = self.lib.mol_dma_weight_reload_result
+        parse_reload.argtypes = [
+            ctypes.POINTER(ResultView), ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        epoch = ctypes.c_uint32()
+        observed = ctypes.c_uint32()
+        self.assertEqual(parse_reload(
+            ctypes.byref(view), ctypes.byref(epoch), ctypes.byref(observed)
+        ), OK)
+        self.assertEqual((epoch.value, observed.value), (7, 0xCAFE))
+        self.assertIsNotNone(raw)
+
+    def test_crc32_words_matches_zlib_little_endian(self) -> None:
+        values = [0x12345678, 0x00FF80A5, 0xDEADBEEF, 0x01020304]
+        payload = words(values)
+        crc32_words = self.lib.mol_dma_crc32_words
+        crc32_words.argtypes = [ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32]
+        crc32_words.restype = ctypes.c_uint32
+        expected = zlib.crc32(struct.pack("<4I", *values)) & 0xFFFFFFFF
+        self.assertEqual(expected, 0x8D97155C)
+        self.assertEqual(crc32_words(payload, len(values)), expected)
+
+    def test_reload_builder_writes_computed_crc_to_user_tag(self) -> None:
+        raw, address, builder = self.new_builder()
+        values = [((index * 0x00010203) ^ 0xA5C30000) & 0xFFFFFFFF
+                  for index in range(4538)]
+        payload = words(values)
+        add_reload = self.lib.mol_dma_builder_add_weight_reload
+        add_reload.argtypes = [
+            ctypes.POINTER(Builder), ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32,
+            ctypes.c_uint32,
+        ]
+        self.assertEqual(add_reload(
+            ctypes.byref(builder), 77, payload, len(values), 900000
+        ), OK)
+        header = struct.unpack_from("<8I", ctypes.string_at(address, 64), 32)
+        expected = zlib.crc32(struct.pack(f"<{len(values)}I", *values)) & 0xFFFFFFFF
+        self.assertEqual((header[0], header[1] & 0xFF, header[5]),
+                         (77, WEIGHT_RELOAD, expected))
+        self.assertIsNotNone(raw)
+
+    def test_bad_reload_result_returns_observed_crc_and_unchanged_epoch(self) -> None:
+        expected_crc = 0x7207BAB4
+        observed_crc = 0x743FA3C3
+        epoch = 1
+        total_words = 8 + 8 + 1 + 8
+        frame_words = [
+            MOLR, VERSION_HEADER, 0xFEED0002, 1, 0, total_words, 0, 0,
+            9, WEIGHT_RELOAD | (11 << 8), 1, 100, 0, 1,
+            expected_crc, observed_crc, epoch,
+            MOLE, 0xFEED0002, 1, 1, total_words, 11, 9, 0,
+        ]
+        frame = struct.pack(f"<{len(frame_words)}I", *frame_words)
+        raw, address = aligned_buffer(len(frame))
+        ctypes.memmove(address, frame, len(frame))
+        iterator = ResultIterator()
+        self.assertEqual(self.lib.mol_dma_results_open(
+            ctypes.byref(iterator), address, len(frame), 0xFEED0002
+        ), OK)
+        view = ResultView()
+        self.assertEqual(self.lib.mol_dma_results_next(
+            ctypes.byref(iterator), ctypes.byref(view)
+        ), 1)
+        parse_reload = self.lib.mol_dma_weight_reload_result
+        parse_reload.argtypes = [
+            ctypes.POINTER(ResultView), ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        new_epoch = ctypes.c_uint32()
+        observed = ctypes.c_uint32()
+        self.assertEqual(parse_reload(
+            ctypes.byref(view), ctypes.byref(new_epoch), ctypes.byref(observed)
+        ), -6)
+        self.assertEqual((new_epoch.value, observed.value), (epoch, observed_crc))
         self.assertIsNotNone(raw)
 
     def test_64_mixed_tasks(self) -> None:

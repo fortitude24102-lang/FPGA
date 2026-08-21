@@ -201,6 +201,16 @@ TESTS = {
         "tb_dma_weight_reload",
         [RTL / "dma_accelerator_backend.v", SIM / "tb_dma_weight_reload.sv"],
     ),
+    "weight_bank_switch": (
+        "tb_weight_bank_switch",
+        [
+            RTL / "gnn_message_passing.v",
+            RTL / "fc_network.v",
+            RTL / "admet_predictor.v",
+            RTL / "dma_accelerator_backend.v",
+            SIM / "tb_weight_bank_switch.sv",
+        ],
+    ),
     "pipeline_latency": (
         "tb_pipeline_latency",
         [

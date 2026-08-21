@@ -76,6 +76,7 @@ module dma_task_queue #(
     output wire [7:0]   backend_task_id,
     output wire [31:0]  backend_task_flags,
     output wire [31:0]  backend_task_item_count,
+    output wire [31:0]  backend_task_user_tag,
     output wire [31:0]  backend_task_timeout_cycles,
     output wire [5:0]   backend_task_sequence,
 
@@ -207,6 +208,7 @@ module dma_task_queue #(
     assign backend_task_id = entry_task_id[ingress_sequence];
     assign backend_task_flags = entry_flags[ingress_sequence];
     assign backend_task_item_count = entry_item_count[ingress_sequence];
+    assign backend_task_user_tag = entry_user_tag[ingress_sequence];
     assign backend_task_timeout_cycles =
         (entry_timeout_cycles[ingress_sequence] == 0) ?
         DEFAULT_TIMEOUT_CYCLES : entry_timeout_cycles[ingress_sequence];

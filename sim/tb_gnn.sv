@@ -62,6 +62,7 @@ module tb_gnn;
         .weight_we(weight_we),
         .weight_addr(weight_addr),
         .weight_wdata(weight_wdata),
+        .cfg_bank(1'b0), .run_bank(1'b0),
         .busy(busy),
         .valid(valid),
         .node_features_out()

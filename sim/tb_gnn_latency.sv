@@ -47,6 +47,7 @@ module tb_gnn_latency;
         .weight_we(1'b0),
         .weight_addr(13'd0),
         .weight_wdata(16'd0),
+        .cfg_bank(1'b0), .run_bank(1'b0),
         .busy(busy),
         .valid(valid)
     );

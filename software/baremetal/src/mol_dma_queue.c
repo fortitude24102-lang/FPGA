@@ -20,6 +20,28 @@ static void put_u32(uint8_t *buffer, uint32_t word_index, uint32_t value)
     p[3] = (uint8_t)(value >> 24);
 }
 
+uint32_t mol_dma_crc32_words(const uint32_t *words, uint32_t word_count)
+{
+    uint32_t crc = UINT32_C(0xFFFFFFFF);
+    uint32_t word_index;
+    uint32_t byte_index;
+    uint32_t bit_index;
+
+    if (words == NULL && word_count != 0U) {
+        return 0U;
+    }
+    for (word_index = 0U; word_index < word_count; ++word_index) {
+        for (byte_index = 0U; byte_index < 4U; ++byte_index) {
+            crc ^= (words[word_index] >> (byte_index * 8U)) & UINT32_C(0xFF);
+            for (bit_index = 0U; bit_index < 8U; ++bit_index) {
+                crc = (crc & 1U) != 0U ?
+                      (crc >> 1) ^ UINT32_C(0xEDB88320) : crc >> 1;
+            }
+        }
+    }
+    return crc ^ UINT32_C(0xFFFFFFFF);
+}
+
 static int is_aligned_64(const void *pointer)
 {
     return (((uintptr_t)pointer & (uintptr_t)63U) == (uintptr_t)0U);
@@ -314,6 +336,21 @@ int mol_dma_builder_add_task(mol_dma_builder_t *builder, uint32_t job_id,
     return MOL_DMA_OK;
 }
 
+int mol_dma_builder_add_weight_reload(mol_dma_builder_t *builder,
+                                      uint32_t job_id,
+                                      const uint32_t *words,
+                                      uint32_t word_count,
+                                      uint32_t timeout_cycles)
+{
+    if (words == NULL || word_count != MOL_DMA_PAYLOAD_WORDS_WEIGHT_RELOAD) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+    return mol_dma_builder_add_task(
+        builder, job_id, MOL_DMA_TASK_WEIGHT_RELOAD, 0U, 1U,
+        mol_dma_crc32_words(words, word_count), timeout_cycles,
+        words, word_count, 1U);
+}
+
 int mol_dma_builder_finalize(mol_dma_builder_t *builder,
                              size_t *transfer_bytes)
 {
@@ -375,6 +412,15 @@ static int valid_success_result_size(uint32_t task_id, uint32_t item_count,
     default:
         return 0;
     }
+}
+
+static int valid_error_result_size(uint32_t task_id, uint32_t status,
+                                   uint32_t item_count, uint32_t result_words)
+{
+    return result_words == 0U ||
+           (task_id == MOL_DMA_TASK_WEIGHT_RELOAD &&
+            status == MOL_DMA_STATUS_INTERNAL_ERROR &&
+            item_count == 1U && result_words == 1U);
 }
 
 int mol_dma_results_open(mol_dma_result_iterator_t *iterator,
@@ -458,9 +504,10 @@ int mol_dma_results_open(mol_dma_result_iterator_t *iterator,
             add_u32_checked(cursor + MOL_DMA_RESULT_HEADER_WORDS,
                             result_words, &record_end) != MOL_DMA_OK ||
             record_end > trailer_word ||
-            ((status == MOL_DMA_STATUS_OK) ?
-             !valid_success_result_size(task_id, item_count, result_words) :
-             (result_words != 0U))) {
+             ((status == MOL_DMA_STATUS_OK) ?
+              !valid_success_result_size(task_id, item_count, result_words) :
+              !valid_error_result_size(task_id, status, item_count,
+                                       result_words))) {
             return MOL_DMA_ERR_FORMAT;
         }
         if (status != MOL_DMA_STATUS_OK) {
@@ -544,6 +591,29 @@ int mol_dma_results_next(mol_dma_result_iterator_t *iterator,
                               view->result_words;
     iterator->records_seen += 1U;
     return 1;
+}
+
+int mol_dma_weight_reload_result(const mol_dma_result_view_t *view,
+                                 uint32_t *new_epoch,
+                                 uint32_t *observed_crc)
+{
+    if (view == NULL || new_epoch == NULL || observed_crc == NULL ||
+        view->task_id != MOL_DMA_TASK_WEIGHT_RELOAD ||
+        view->item_count != 1U || view->result_words != 1U ||
+        view->payload == NULL) {
+        return MOL_DMA_ERR_ARGUMENT;
+    }
+
+    *new_epoch = get_u32(view->payload, 0U);
+    *observed_crc = view->detail;
+    if (view->status == MOL_DMA_STATUS_OK) {
+        return view->detail == view->user_tag ? MOL_DMA_OK : MOL_DMA_ERR_FORMAT;
+    }
+    if (view->status == MOL_DMA_STATUS_INTERNAL_ERROR &&
+        view->detail != view->user_tag) {
+        return MOL_DMA_ERR_HARDWARE;
+    }
+    return MOL_DMA_ERR_FORMAT;
 }
 
 int mol_dma_find_response_bytes(const void *buffer, size_t capacity_bytes,

@@ -36,6 +36,7 @@ module tb_fc_network;
         .cfg_layer(cfg_layer),
         .cfg_addr(cfg_addr),
         .cfg_wdata(cfg_wdata),
+        .cfg_bank(1'b0), .run_bank(1'b0),
         .busy(busy),
         .valid(valid),
         .outputs(outputs)

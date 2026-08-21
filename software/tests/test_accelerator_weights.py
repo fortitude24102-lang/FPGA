@@ -59,6 +59,8 @@ class AcceleratorWeightTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        ctypes.windll.kernel32.FreeLibrary(cls.lib._handle)
+        cls.lib = None
         cls.temp_dir.cleanup()
 
     def test_reference_weights_are_halfword_packed_low_first(self) -> None:

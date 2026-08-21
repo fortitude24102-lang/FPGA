@@ -26,6 +26,7 @@ module tb_admet_latency;
         .cfg_layer(2'b00),
         .cfg_addr(16'd0),
         .cfg_wdata({DATA_WIDTH{1'b0}}),
+        .cfg_bank(1'b0), .run_bank(1'b0),
         .busy(),
         .valid(valid),
         .logp(),
