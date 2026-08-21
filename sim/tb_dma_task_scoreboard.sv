@@ -905,6 +905,132 @@ module tb_dma_task_scoreboard;
         end
     endtask
 
+    task automatic recovery_case_r1;
+        begin
+            recovery_reset(7);
+            start_batch(32'h5C0B7002, 2, 128);
+            fmt_result_ready = 1'b0;
+            fmt_result_data_ready = 1'b0;
+            submit_recovery_task(0, `MOL_DMA_TASK_TANIMOTO, 0, 1, 1,
+                                 100000, 1);
+
+            backend_task_ready = 1'b0;
+            allocate_recovery_task(1, `MOL_DMA_TASK_ADMET, 0, 1, 1,
+                                   100000, 1);
+            if (dut.ingress_state !== 2'd1 ||
+                backend_task_valid !== 1'b1)
+                $fatal(1, "R1 setup: younger descriptor was not waiting in DISPATCH");
+
+            @(negedge clk);
+            backend_done_sequence = 0;
+            backend_done_status = 0;
+            backend_done_result_words = 300;
+            backend_done_detail = 32'hBAD07001;
+            backend_done_valid = 1'b1;
+            backend_task_ready = 1'b1;
+            #1;
+            if (backend_done_ready !== 1'b1 ||
+                backend_task_valid !== 1'b1)
+                $fatal(1, "R1 setup: malformed done and dispatch did not coincide");
+            @(posedge clk);
+            #1;
+            backend_done_valid = 1'b0;
+            backend_task_ready = 1'b0;
+
+            if (backend_abort !== 1'b1 ||
+                dut.entry_complete[1] !== 1'b1 ||
+                dut.entry_result_status[1] !==
+                    `MOL_DMA_STATUS_INTERNAL_ERROR ||
+                dut.entry_has_buffer[1] !== 1'b0 ||
+                dut.pool_valid[1] !== 1'b0)
+                $fatal(1, "R1 RED: same-cycle dispatched entry escaped protocol abort");
+            if (dut.ingress_state !== 2'd3 || in_payload_ready !== 1'b1)
+                $fatal(1, "R1: aborted descriptor did not locally drain its frame");
+
+            @(negedge clk);
+            in_payload_data = 32'hC3700100;
+            in_payload_last = 1'b1;
+            in_payload_valid = 1'b1;
+            @(posedge clk);
+            #1;
+            in_payload_valid = 1'b0;
+            in_payload_last = 1'b0;
+            if (dut.ingress_state !== 2'd0)
+                $fatal(1, "R1: local descriptor drain did not return to IDLE");
+
+            expect_recovery_result(32'h53000000,
+                                   `MOL_DMA_STATUS_INTERNAL_ERROR, 0, 0);
+            expect_recovery_result(32'h53000001,
+                                   `MOL_DMA_STATUS_INTERNAL_ERROR, 0, 0);
+            end_batch();
+            wait_recovery_finish(2, 2);
+            $display("PASS recovery R1: protocol abort owns same-cycle dispatch");
+        end
+    endtask
+
+    task automatic recovery_case_r2;
+        integer wait_cycles;
+        begin
+            recovery_reset(8);
+            start_batch(32'h5C0B8002, 2, 128);
+            fmt_result_ready = 1'b0;
+            fmt_result_data_ready = 1'b0;
+            submit_recovery_task(0, `MOL_DMA_TASK_TANIMOTO, 0, 1, 1,
+                                 100000, 1);
+
+            allocate_recovery_task(1, `MOL_DMA_TASK_ADMET, 0, 1, 1,
+                                   100000, 1);
+            wait_cycles = 0;
+            while ((backend_task_valid !== 1'b1) &&
+                   (wait_cycles < 2000)) begin
+                @(negedge clk);
+                wait_cycles = wait_cycles + 1;
+            end
+            if (wait_cycles == 2000)
+                $fatal(1, "R2 setup: younger descriptor never dispatched");
+            @(posedge clk);
+            #1;
+            if (dut.ingress_state !== 2'd2)
+                $fatal(1, "R2 setup: younger task did not enter PAYLOAD");
+
+            @(negedge clk);
+            in_payload_data = 32'hC3800100;
+            in_payload_last = 1'b1;
+            in_payload_valid = 1'b1;
+            backend_done_sequence = 0;
+            backend_done_status = 0;
+            backend_done_result_words = 300;
+            backend_done_detail = 32'hBAD08001;
+            backend_done_valid = 1'b1;
+            #1;
+            if (in_payload_ready !== 1'b1 ||
+                backend_done_ready !== 1'b1)
+                $fatal(1, "R2 setup: payload_last and malformed done did not coincide");
+            @(posedge clk);
+            #1;
+            in_payload_valid = 1'b0;
+            in_payload_last = 1'b0;
+            backend_done_valid = 1'b0;
+
+            if (backend_abort !== 1'b1 ||
+                dut.entry_complete[1] !== 1'b1 ||
+                dut.entry_result_status[1] !==
+                    `MOL_DMA_STATUS_INTERNAL_ERROR)
+                $fatal(1, "R2: same-cycle payload owner escaped protocol abort");
+            if (dut.ingress_state !== 2'd0 ||
+                in_payload_ready !== 1'b0)
+                $fatal(1, "R2 RED: accepted payload_last left a phantom drain");
+
+            expect_recovery_result(32'h53000000,
+                                   `MOL_DMA_STATUS_INTERNAL_ERROR, 0, 0);
+            expect_recovery_result(32'h53000001,
+                                   `MOL_DMA_STATUS_INTERNAL_ERROR, 0, 0);
+            end_batch();
+            wait_recovery_finish(2, 2);
+            $display("PASS recovery R2: accepted payload_last ends abort drain");
+        end
+    endtask
+
     task automatic run_recovery_case;
         input integer case_number;
         begin
@@ -915,6 +1041,8 @@ module tb_dma_task_scoreboard;
                 4: recovery_case_d();
                 5: recovery_case_e();
                 6: recovery_case_f();
+                7: recovery_case_r1();
+                8: recovery_case_r2();
                 default: $fatal(1, "unknown recovery case %0d", case_number);
             endcase
         end
@@ -1051,7 +1179,7 @@ module tb_dma_task_scoreboard;
         if (result_headers != 1 || result_data_index != 3200)
             $fatal(1, "FULL direct result did not retire completely");
         $display("PASS oldest one-item FULL direct streaming and backpressure");
-        for (i = 1; i <= 6; i = i + 1)
+        for (i = 1; i <= 8; i = i + 1)
             run_recovery_case(i);
         $display("ALL SCOREBOARD RECOVERY TESTS PASSED");
         $finish;

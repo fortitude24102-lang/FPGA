@@ -211,6 +211,7 @@ module dma_task_queue #(
         (entry_timeout_cycles[ingress_sequence] == 0) ?
         DEFAULT_TIMEOUT_CYCLES : entry_timeout_cycles[ingress_sequence];
     assign backend_task_sequence = ingress_sequence;
+    wire backend_task_fire = backend_task_valid && backend_task_ready;
 
     assign backend_payload_valid = (ingress_state == INGRESS_PAYLOAD) &&
                                    !timeout_request && !abort_guard &&
@@ -221,6 +222,10 @@ module dma_task_queue #(
                               ((ingress_state == INGRESS_PAYLOAD) &&
                                !timeout_request && !abort_guard &&
                                backend_payload_ready);
+    wire backend_payload_fire = backend_payload_valid &&
+                                backend_payload_ready;
+    wire backend_payload_last_fire = backend_payload_fire &&
+                                     (backend_payload_last === 1'b1);
 
     wire done_metadata_known =
         (^backend_done_sequence !== 1'bx) &&
@@ -484,7 +489,7 @@ module dma_task_queue #(
                     ingress_state <= INGRESS_DISPATCH;
             end
 
-            if (backend_task_valid && backend_task_ready) begin
+            if (backend_task_fire) begin
                 entry_dispatched[ingress_sequence] <= 1'b1;
                 if (ingress_large_full) begin
                     entry_direct[ingress_sequence] <= 1'b1;
@@ -496,8 +501,7 @@ module dma_task_queue #(
                 end
                 ingress_state <= INGRESS_PAYLOAD;
             end
-            if (backend_payload_valid && backend_payload_ready &&
-                backend_payload_last) begin
+            if (backend_payload_last_fire) begin
                 entry_running[ingress_sequence] <= 1'b1;
                 ingress_state <= INGRESS_IDLE;
             end
@@ -594,13 +598,22 @@ module dma_task_queue #(
                 abort_guard <= 1'b1;
                 direct_exclusive <= 1'b0;
                 if (ingress_state == INGRESS_PAYLOAD)
+                    ingress_state <= backend_payload_last_fire ?
+                                     INGRESS_IDLE : INGRESS_DRAIN;
+                else if ((ingress_state == INGRESS_DISPATCH) &&
+                         backend_task_fire)
                     ingress_state <= INGRESS_DRAIN;
                 for (state_index = 0; state_index < 64;
                      state_index = state_index + 1) begin
                     if (entry_valid[state_index] &&
-                        entry_dispatched[state_index] &&
+                        (entry_dispatched[state_index] ||
+                         (protocol_abort_fire && backend_task_fire &&
+                          (state_index == ingress_sequence))) &&
                         !entry_complete[state_index]) begin
-                        if (entry_has_buffer[state_index])
+                        if (protocol_abort_fire && backend_task_fire &&
+                            (state_index == ingress_sequence))
+                            pool_valid[ingress_sequence] <= 1'b0;
+                        else if (entry_has_buffer[state_index])
                             pool_valid[entry_pool_select[state_index]] <= 1'b0;
                         entry_running[state_index] <= 1'b0;
                         entry_complete[state_index] <= 1'b1;
