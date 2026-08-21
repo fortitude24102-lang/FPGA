@@ -77,13 +77,15 @@ def parse_c_constants(text: str) -> dict[str, int]:
 
 
 class ProtocolCodegenTests(unittest.TestCase):
-    def run_generator(self, verilog_out: Path, c_out: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+    def run_generator(
+        self, verilog_out: Path, c_out: Path, *extra: str, spec: Path = SPEC
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 sys.executable,
                 str(GENERATOR),
                 "--spec",
-                str(SPEC),
+                str(spec),
                 "--verilog-out",
                 str(verilog_out),
                 "--c-out",
@@ -147,7 +149,50 @@ class ProtocolCodegenTests(unittest.TestCase):
             self.assertIn("#define MOL_DMA_WEIGHT_RELOAD_RESULT_EPOCH_WORDS UINT32_C(1)", c_header)
             self.assertEqual(spec["weight_reload"]["expected_crc_field"], "user_tag")
             self.assertEqual(spec["weight_reload"]["observed_crc_field"], "detail")
+            self.assertEqual(spec["weight_reload"].get("crc32_algorithm"), "ieee")
             self.assertEqual(spec["weight_reload"]["result_epoch_words"], 1)
+
+    def test_rejects_non_v2_frozen_limits(self) -> None:
+        """Catches a schema that accepts a limit outside the frozen v2 contract."""
+        expected_limits = {
+            "max_tasks": 64,
+            "max_transfer_bytes": 2097152,
+            "max_transfer_words": 524288,
+            "max_item_count": 128,
+        }
+        source_spec = json.loads(SPEC.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            for name, expected in expected_limits.items():
+                invalid_spec = json.loads(json.dumps(source_spec))
+                invalid_spec["limits"][name] = expected - 1
+                spec_path = temporary / f"invalid_{name}.json"
+                spec_path.write_text(json.dumps(invalid_spec), encoding="utf-8")
+
+                completed = self.run_generator(
+                    temporary / f"{name}.vh",
+                    temporary / f"{name}.h",
+                    spec=spec_path,
+                )
+
+                self.assertNotEqual(completed.returncode, 0, name)
+                self.assertIn("protocol limits", completed.stdout.lower(), name)
+
+    def test_rejects_non_ieee_weight_reload_crc32(self) -> None:
+        """Catches a weight-reload CRC variant other than the frozen IEEE CRC32."""
+        source_spec = json.loads(SPEC.read_text(encoding="utf-8"))
+        source_spec["weight_reload"]["crc32_algorithm"] = "crc32c"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            spec_path = temporary / "invalid_crc32.json"
+            spec_path.write_text(json.dumps(source_spec), encoding="utf-8")
+
+            completed = self.run_generator(
+                temporary / "protocol.vh", temporary / "protocol.h", spec=spec_path
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("crc32 algorithm", completed.stdout.lower())
 
     def test_check_mode_rejects_generated_file_drift(self) -> None:
         """Catches hand edits or stale generated protocol headers."""

@@ -116,12 +116,25 @@ def validate_spec(spec: Mapping[str, object], constants: list[tuple[str, int, bo
     if sorted(parse_integer(value) for value in statuses.values()) != list(range(12)):
         raise ValueError("status codes must be the contiguous range 0..11")
 
+    limits = spec["limits"]
+    assert isinstance(limits, Mapping)
+    expected_limits = {
+        "max_tasks": 64,
+        "max_transfer_bytes": 2097152,
+        "max_transfer_words": 524288,
+        "max_item_count": 128,
+    }
+    if any(parse_integer(limits.get(name)) != value for name, value in expected_limits.items()):
+        raise ValueError("protocol limits must match the frozen v2 contract")
+
     weight_reload = spec["weight_reload"]
     assert isinstance(weight_reload, Mapping)
     if weight_reload.get("expected_crc_field") != "user_tag":
         raise ValueError("weight reload expected CRC must use task user_tag")
     if weight_reload.get("observed_crc_field") != "detail":
         raise ValueError("weight reload observed CRC must use result detail")
+    if weight_reload.get("crc32_algorithm") != "ieee":
+        raise ValueError("weight reload CRC32 algorithm must be IEEE")
     if parse_integer(weight_reload.get("result_epoch_words")) != 1:
         raise ValueError("weight reload result must contain one epoch word")
 

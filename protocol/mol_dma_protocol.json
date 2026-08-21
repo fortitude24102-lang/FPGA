@@ -63,6 +63,7 @@
   "weight_reload": {
     "expected_crc_field": "user_tag",
     "observed_crc_field": "detail",
+    "crc32_algorithm": "ieee",
     "result_epoch_words": 1
   },
   "field_offsets": {
