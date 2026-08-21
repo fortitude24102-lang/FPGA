@@ -36,6 +36,7 @@ module tb_weight_bank_switch;
     wire result_valid;
     reg result_ready = 1'b1;
     wire [31:0] result_data;
+    reg backend_abort = 1'b0;
 
     wire tanimoto_start;
     reg [5:0] tanimoto_countdown = 0;
@@ -188,7 +189,7 @@ module tb_weight_bank_switch;
         .done_status(done_status), .done_result_words(done_result_words),
         .done_detail(done_detail), .done_sequence(done_sequence),
         .result_valid(result_valid), .result_ready(result_ready),
-        .result_data(result_data), .abort(1'b0),
+        .result_data(result_data), .abort(backend_abort),
         .engine_busy(), .engine_start(), .engine_done(),
         .tanimoto_start(tanimoto_start), .fingerprint_we(),
         .fingerprint_db_select(), .fingerprint_addr(), .fingerprint_wdata(),
@@ -442,6 +443,24 @@ module tb_weight_bank_switch;
         repeat (5) @(posedge clk);
         rst_n = 1'b1;
         repeat (2) @(posedge clk);
+
+        // B: a verified image is not committed until its epoch result is
+        // accepted. An abort anywhere in the done/result window cancels it.
+        result_ready = 1'b0;
+        send_reload(1, 1'b0, IMAGE1_CRC, 6'd0, 1'b0);
+        wait (result_valid && done_sequence == 6'd0);
+        if (weight_run_bank !== 1'b0 ||
+            dut.reload_controller.reload_epoch !== 32'd0)
+            $fatal(1, "B RED: reload committed before result handshake");
+        @(negedge clk);
+        backend_abort = 1'b1;
+        @(negedge clk);
+        backend_abort = 1'b0;
+        repeat (2) @(posedge clk);
+        if (weight_run_bank !== 1'b0 ||
+            dut.reload_controller.reload_epoch !== 32'd0)
+            $fatal(1, "B: abort committed a reported-failed reload");
+        result_ready = 1'b1;
 
         // Initialize bank 0 to GNN weight 1.0 and ADMET sigmoid(1.0).
         manual_cfg = 1'b1;

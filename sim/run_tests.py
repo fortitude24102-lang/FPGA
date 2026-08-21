@@ -201,6 +201,10 @@ TESTS = {
         "tb_dma_weight_reload",
         [RTL / "dma_accelerator_backend.v", SIM / "tb_dma_weight_reload.sv"],
     ),
+    "weight_reload_bounds": (
+        "tb_dma_weight_reload_bounds",
+        [RTL / "dma_accelerator_backend.v", SIM / "tb_dma_weight_reload_bounds.sv"],
+    ),
     "weight_bank_switch": (
         "tb_weight_bank_switch",
         [

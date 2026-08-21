@@ -1,5 +1,7 @@
 `timescale 1ns/1ps
 
+`include "mol_dma_protocol.vh"
+
 module tb_top_dma_tasks;
     localparam int MAX_WORDS = 12000;
     localparam int MAX_TASKS = 8;
@@ -16,6 +18,15 @@ module tb_top_dma_tasks;
     wire m_valid;
     logic m_ready = 1;
     wire m_last;
+    logic [17:0] awaddr = 0;
+    logic awvalid = 0;
+    wire awready;
+    logic [31:0] wdata = 0;
+    logic [3:0] wstrb = 0;
+    logic wvalid = 0;
+    wire wready;
+    wire bvalid;
+    logic bready = 0;
 
     logic [31:0] request [0:MAX_WORDS-1];
     logic [31:0] response [0:MAX_WORDS-1];
@@ -34,6 +45,9 @@ module tb_top_dma_tasks;
     integer lane;
     integer engine_launch_count;
     wire [2:0] engine_start;
+    reg saw_legacy_gnn_cfg_bank1 = 1'b0;
+    reg saw_legacy_admet_cfg_bank1 = 1'b0;
+    reg saw_reload_queue_capture = 1'b0;
 
     always #5 clk = ~clk;
 
@@ -43,10 +57,10 @@ module tb_top_dma_tasks;
     ) dut (
         .s_axi_aclk(clk), .s_axi_aresetn(rst_n),
         .s_axi_awprot(3'd0), .s_axi_arprot(3'd0),
-        .s_axi_awaddr(18'd0), .s_axi_awvalid(1'b0), .s_axi_awready(),
-        .s_axi_wdata(32'd0), .s_axi_wstrb(4'd0),
-        .s_axi_wvalid(1'b0), .s_axi_wready(),
-        .s_axi_bresp(), .s_axi_bvalid(), .s_axi_bready(1'b1),
+        .s_axi_awaddr(awaddr), .s_axi_awvalid(awvalid), .s_axi_awready(awready),
+        .s_axi_wdata(wdata), .s_axi_wstrb(wstrb),
+        .s_axi_wvalid(wvalid), .s_axi_wready(wready),
+        .s_axi_bresp(), .s_axi_bvalid(bvalid), .s_axi_bready(bready),
         .s_axi_araddr(18'd0), .s_axi_arvalid(1'b0), .s_axi_arready(),
         .s_axi_rdata(), .s_axi_rresp(), .s_axi_rvalid(), .s_axi_rready(1'b1),
         .s_axis_job_tdata(s_data), .s_axis_job_tkeep(s_keep),
@@ -57,6 +71,25 @@ module tb_top_dma_tasks;
         .m_axis_result_tlast(m_last),
         .engine_start(engine_start)
     );
+
+    task automatic axi_write(input [17:0] address, input [31:0] value);
+        begin
+            @(negedge clk);
+            awaddr = address;
+            awvalid = 1'b1;
+            wdata = value;
+            wstrb = 4'hf;
+            wvalid = 1'b1;
+            bready = 1'b1;
+            while (!(awready && wready)) @(negedge clk);
+            @(negedge clk);
+            awvalid = 1'b0;
+            wvalid = 1'b0;
+            while (!bvalid) @(negedge clk);
+            @(negedge clk);
+            bready = 1'b0;
+        end
+    endtask
 
     task automatic begin_batch(input integer task_count);
         begin
@@ -204,6 +237,10 @@ module tb_top_dma_tasks;
                                 if (response[cursor+8+p] !== 32'h00000100)
                                     $fatal(1, "%0s ADMET result %0d mismatch: %08x",
                                            label, p, response[cursor+8+p]);
+                        if (expected_task[t] == `MOL_DMA_TASK_WEIGHT_RELOAD &&
+                            response[cursor+8] !== 32'd1)
+                            $fatal(1, "%0s reload epoch mismatch: %08x",
+                                   label, response[cursor+8]);
                         cursor = cursor + 8 + expected_result_words[t];
                     end
                     if (response[cursor] !== 32'h4d4f4c45 ||
@@ -230,6 +267,22 @@ module tb_top_dma_tasks;
             engine_launch_count <= 0;
         else if (|engine_start)
             engine_launch_count <= engine_launch_count + 1;
+        if (rst_n && !dut.dma_active && dut.core_gnn_weight_we) begin
+            if (dut.core_weight_cfg_bank !== 1'b1)
+                $fatal(1, "D: legacy GNN config selected bank0");
+            saw_legacy_gnn_cfg_bank1 <= 1'b1;
+        end
+        if (rst_n && !dut.dma_active && dut.core_admet_cfg_we) begin
+            if (dut.core_weight_cfg_bank !== 1'b1)
+                $fatal(1, "D: legacy ADMET config selected bank0");
+            saw_legacy_admet_cfg_bank1 <= 1'b1;
+        end
+        if (rst_n && dut.backend_result_valid && dut.backend_result_ready &&
+            dut.u_dma_backend.reload_controller.reload_good) begin
+            if (!dut.u_dma_queue.capture_active || dut.backend_abort)
+                $fatal(1, "reload commit was not an abort-safe queue capture");
+            saw_reload_queue_capture <= 1'b1;
+        end
         if (rst_n && m_valid && m_ready) begin
             for (lane = 0; lane < 4; lane = lane + 1)
                 if (m_keep[lane*4 +: 4] == 4'hf) begin
@@ -282,6 +335,36 @@ module tb_top_dma_tasks;
         if (engine_launch_count != launches_before)
             $fatal(1, "unsupported FULL tasks launched a core: %0d -> %0d",
                    launches_before, engine_launch_count);
+
+        // D: a completed DMA activation is also the bank used and configured
+        // by the later legacy/MMIO path.
+        begin_batch(1);
+        add_task(15, `MOL_DMA_TASK_WEIGHT_RELOAD, 0, 4538, 1, 1,
+                 32'hcb3f_efe2);
+        expected_detail[expected_count-1] = 32'hcb3f_efe2;
+        send_batch();
+        check_response("reload then legacy");
+        wait (dut.dma_active === 1'b0);
+        repeat (2) @(posedge clk);
+        if (dut.core_weight_run_bank !== 1'b1 ||
+            dut.core_weight_cfg_bank !== 1'b1)
+            $fatal(1, "D RED: legacy path reverted to bank0 after DMA activation");
+        if (!saw_reload_queue_capture)
+            $fatal(1, "reload result did not commit through queue capture");
+
+        axi_write(18'h00400, 32'h0000_beef);
+        axi_write(18'h00404, 32'd0);
+        axi_write(18'h00410, 32'h0000_1234);
+        axi_write(18'h00414, 32'd0);
+        if (!saw_legacy_gnn_cfg_bank1 || !saw_legacy_admet_cfg_bank1)
+            $fatal(1, "D: legacy config pulses missing GNN/ADMET=%b/%b",
+                   saw_legacy_gnn_cfg_bank1, saw_legacy_admet_cfg_bank1);
+        axi_write(18'h00000, 32'h0000_0003);
+        wait (dut.gnn_start === 1'b1);
+        @(posedge clk);
+        @(negedge clk);
+        if (dut.u_gnn.active_weight_bank !== 1'b1)
+            $fatal(1, "D: legacy GNN start did not latch global bank1");
 
         $display("ALL TOP DMA TASK TESTS PASSED");
         $finish;

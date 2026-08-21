@@ -57,6 +57,8 @@ module dma_weight_reload_controller #(
     localparam [2:0] ST_WRITE_HIGH = 3'd3;
     localparam [2:0] ST_DONE = 3'd4;
     localparam [2:0] ST_RESULT = 3'd5;
+    localparam [2:0] ST_DRAIN = 3'd6;
+    localparam [12:0] RELOAD_LAST_WORD = 13'd4537;
 
     reg [2:0] state;
     reg [31:0] expected_crc_reg;
@@ -64,6 +66,7 @@ module dma_weight_reload_controller #(
     reg [31:0] observed_crc;
     reg [31:0] reload_word;
     reg reload_word_last;
+    reg [12:0] reload_payload_word_index;
     reg [13:0] reload_weight_index;
     reg [1:0] reload_admet_model;
     reg [1:0] reload_admet_layer;
@@ -155,13 +158,13 @@ module dma_weight_reload_controller #(
     endtask
 
     assign task_ready = state == ST_IDLE;
-    assign payload_ready = state == ST_LOAD;
+    assign payload_ready = state == ST_LOAD || state == ST_DRAIN;
     assign done_valid = state == ST_DONE;
     assign done_status = reload_good ? 24'd0 : `MOL_DMA_STATUS_INTERNAL_ERROR;
     assign done_result_words = 32'd1;
     assign done_detail = observed_crc;
     assign result_valid = state == ST_RESULT;
-    assign result_data = reload_epoch;
+    assign result_data = reload_good ? reload_epoch + 1'b1 : reload_epoch;
     assign weight_run_bank = active_bank;
 
     always @(posedge clk or negedge rst_n) begin
@@ -172,6 +175,7 @@ module dma_weight_reload_controller #(
             observed_crc <= 0;
             reload_word <= 0;
             reload_word_last <= 1'b0;
+            reload_payload_word_index <= 0;
             reload_weight_index <= 0;
             reload_admet_model <= 0;
             reload_admet_layer <= 0;
@@ -201,6 +205,7 @@ module dma_weight_reload_controller #(
                         expected_crc_reg <= expected_crc;
                         crc_state <= 32'hffff_ffff;
                         reload_weight_index <= 0;
+                        reload_payload_word_index <= 0;
                         reload_admet_model <= 0;
                         reload_admet_layer <= 0;
                         reload_admet_addr <= 0;
@@ -224,20 +229,39 @@ module dma_weight_reload_controller #(
                     ST_WRITE_HIGH: begin
                         emit_reload_weight(reload_word[31:16]);
                         if (reload_word_last) begin
-                            reload_good <= observed_crc == expected_crc_reg;
-                            if (observed_crc == expected_crc_reg) begin
-                                active_bank <= weight_cfg_bank;
-                                reload_epoch <= reload_epoch + 1'b1;
-                            end
+                            reload_good <=
+                                reload_payload_word_index == RELOAD_LAST_WORD &&
+                                observed_crc == expected_crc_reg;
                             state <= ST_DONE;
+                        end else if (reload_payload_word_index ==
+                                     RELOAD_LAST_WORD) begin
+                            reload_good <= 1'b0;
+                            state <= ST_DRAIN;
                         end else begin
+                            reload_payload_word_index <=
+                                reload_payload_word_index + 1'b1;
                             state <= ST_LOAD;
+                        end
+                    end
+                    ST_DRAIN: if (payload_valid) begin
+                        crc_state <= crc32_word(crc_state, payload_data);
+                        if (payload_last) begin
+                            observed_crc <=
+                                crc32_word(crc_state, payload_data) ^
+                                32'hffff_ffff;
+                            reload_good <= 1'b0;
+                            state <= ST_DONE;
                         end
                     end
                     ST_DONE: if (done_ready)
                         state <= ST_RESULT;
-                    ST_RESULT: if (result_ready)
+                    ST_RESULT: if (result_ready) begin
+                        if (reload_good) begin
+                            active_bank <= weight_cfg_bank;
+                            reload_epoch <= reload_epoch + 1'b1;
+                        end
                         state <= ST_IDLE;
+                    end
                     default: state <= ST_IDLE;
                 endcase
             end
@@ -445,6 +469,10 @@ module dma_accelerator_backend #(
     wire reload_admet_cfg_we;
     wire [1:0] reload_admet_cfg_model, reload_admet_cfg_layer;
     wire [15:0] reload_admet_cfg_addr, reload_admet_cfg_wdata;
+    reg gnn_weight_bank_locked;
+    reg gnn_latched_weight_bank;
+    reg admet_weight_bank_locked;
+    reg admet_latched_weight_bank;
 
     wire all_lanes_idle = !tani_controller_busy[0] &&
                           !gnn_controller_busy[0] &&
@@ -452,12 +480,19 @@ module dma_accelerator_backend #(
                           !tanimoto_busy && !gnn_busy && !admet_busy;
     wire exclusive_request = task_id == `MOL_DMA_TASK_PIPELINE;
     wire reload_request = task_id == `MOL_DMA_TASK_WEIGHT_RELOAD;
+    wire reload_target_bank = ~weight_run_bank;
+    wire reload_target_available =
+        !(gnn_weight_bank_locked &&
+          gnn_latched_weight_bank == reload_target_bank) &&
+        !(admet_weight_bank_locked &&
+          admet_latched_weight_bank == reload_target_bank);
     wire selected_lane_ready =
         (task_id == `MOL_DMA_TASK_TANIMOTO) ? tani_task_ready :
         (task_id == `MOL_DMA_TASK_GNN) ? gnn_task_ready_i :
         (task_id == `MOL_DMA_TASK_ADMET) ? admet_task_ready_i :
         exclusive_request ? (all_lanes_idle && exclusive_task_ready_i) :
-        reload_request ? reload_task_ready_i : 1'b0;
+        reload_request ? (reload_task_ready_i && reload_target_available) :
+                         1'b0;
 
     assign task_ready = ingress_route == ROUTE_NONE && selected_lane_ready &&
                         (reload_request || !exclusive_active);
@@ -600,6 +635,28 @@ module dma_accelerator_backend #(
     assign admet_cfg_layer = reload_admet_cfg_layer;
     assign admet_cfg_addr = reload_admet_cfg_addr;
     assign admet_cfg_wdata = reload_admet_cfg_wdata;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            gnn_weight_bank_locked <= 1'b0;
+            gnn_latched_weight_bank <= 1'b0;
+            admet_weight_bank_locked <= 1'b0;
+            admet_latched_weight_bank <= 1'b0;
+        end else begin
+            if (gnn_start) begin
+                gnn_weight_bank_locked <= 1'b1;
+                gnn_latched_weight_bank <= weight_run_bank;
+            end else if (gnn_weight_bank_locked && !gnn_busy) begin
+                gnn_weight_bank_locked <= 1'b0;
+            end
+            if (admet_start) begin
+                admet_weight_bank_locked <= 1'b1;
+                admet_latched_weight_bank <= weight_run_bank;
+            end else if (admet_weight_bank_locked && !admet_busy) begin
+                admet_weight_bank_locked <= 1'b0;
+            end
+        end
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

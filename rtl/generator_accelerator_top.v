@@ -475,8 +475,9 @@ module generator_accelerator_top #(
         dma_active ? dma_admet_cfg_addr : admet_cfg_addr;
     wire [DATA_WIDTH-1:0] core_admet_cfg_wdata =
         dma_active ? dma_admet_cfg_wdata : admet_weight_data_reg;
-    wire core_weight_cfg_bank = dma_active ? dma_weight_cfg_bank : 1'b0;
-    wire core_weight_run_bank = dma_active ? dma_weight_run_bank : 1'b0;
+    wire core_weight_cfg_bank =
+        dma_active ? dma_weight_cfg_bank : dma_weight_run_bank;
+    wire core_weight_run_bank = dma_weight_run_bank;
 
     tanimoto_accelerator u_tanimoto (
         .clk(s_axi_aclk),

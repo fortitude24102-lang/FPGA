@@ -11,6 +11,7 @@ module tb_pipeline_parallel;
     reg task_valid = 1'b0;
     wire task_ready;
     reg [7:0] task_id = PIPELINE_ID;
+    reg [31:0] task_user_tag = 0;
     reg [31:0] task_flags = 0;
     reg [31:0] task_item_count = 2;
     reg payload_valid = 1'b0;
@@ -28,6 +29,8 @@ module tb_pipeline_parallel;
     wire tani_write_bank, tani_run_bank;
     wire gnn_write_bank, gnn_run_bank;
     wire admet_write_bank, admet_run_bank;
+    wire weight_cfg_bank, weight_run_bank;
+    wire gnn_weight_we, admet_cfg_we;
 
     integer cycles = 0;
     integer launch_count = 0;
@@ -44,6 +47,7 @@ module tb_pipeline_parallel;
     integer gnn_done_cycle = -1;
     integer admet_done_cycle = -1;
     integer stranded_ready_cycles = 0;
+    integer reload_weight_write_count = 0;
     reg saw_tani_bank1_write = 0;
     reg saw_gnn_bank1_write = 0;
     reg saw_admet_bank1_write = 0;
@@ -60,7 +64,7 @@ module tb_pipeline_parallel;
         .clk(clk), .rst_n(rst_n),
         .task_valid(task_valid), .task_ready(task_ready),
         .task_id(task_id), .task_flags(task_flags),
-        .task_item_count(task_item_count), .task_user_tag(32'd0),
+        .task_item_count(task_item_count), .task_user_tag(task_user_tag),
         .task_sequence(6'd7),
         .payload_valid(payload_valid), .payload_ready(payload_ready),
         .payload_data(payload_data), .payload_last(payload_last),
@@ -85,14 +89,15 @@ module tb_pipeline_parallel;
         .gnn_output_re(), .gnn_output_addr(),
         .gnn_output_rdata(32'h2222_0001),
         .gnn_busy(gnn_busy), .gnn_valid(gnn_valid),
-        .gnn_weight_we(), .gnn_weight_addr(), .gnn_weight_wdata(),
+        .gnn_weight_we(gnn_weight_we), .gnn_weight_addr(), .gnn_weight_wdata(),
         .admet_start(), .admet_input_write_bank(admet_write_bank),
         .admet_input_run_bank(admet_run_bank),
         .descriptor_we(descriptor_we), .descriptor_addr(),
         .descriptor_wdata(), .admet_busy(admet_busy),
         .admet_valid(admet_valid), .admet_predictions(prediction_value),
-        .admet_cfg_we(), .admet_cfg_model(), .admet_cfg_layer(),
-        .admet_cfg_addr(), .admet_cfg_wdata()
+        .admet_cfg_we(admet_cfg_we), .admet_cfg_model(), .admet_cfg_layer(),
+        .admet_cfg_addr(), .admet_cfg_wdata(),
+        .weight_cfg_bank(weight_cfg_bank), .weight_run_bank(weight_run_bank)
     );
 
     always @(posedge clk) begin
@@ -109,6 +114,7 @@ module tb_pipeline_parallel;
             saw_tani_bank1_write <= 0;
             saw_gnn_bank1_write <= 0;
             saw_admet_bank1_write <= 0;
+            reload_weight_write_count <= 0;
         end else if (|engine_start) begin
             if (task_id == PIPELINE_ID && engine_start !== 3'b111)
                 $fatal(1, "non-atomic Pipeline start %03b", engine_start);
@@ -163,6 +169,8 @@ module tb_pipeline_parallel;
             saw_gnn_bank1_write <= 1'b1;
         if (admet_busy && descriptor_we && admet_write_bank)
             saw_admet_bank1_write <= 1'b1;
+        if (gnn_weight_we || admet_cfg_we)
+            reload_weight_write_count <= reload_weight_write_count + 1;
     end
 
     task reset_backend;
@@ -208,6 +216,7 @@ module tb_pipeline_parallel;
     initial begin : test
         integer word_index;
         integer result_index;
+        integer writes_before;
         reg [31:0] expected;
         reset_backend();
         task_id = PIPELINE_ID;
@@ -285,6 +294,82 @@ module tb_pipeline_parallel;
             done_result_words != 0 || launch_count != 0)
             $fatal(1, "GNN batched FULL status=%h detail=%h words=%0d launches=%0d",
                    done_status, done_detail, done_result_words, launch_count);
+
+        // A: after a successful flip, the next inactive target cannot be
+        // rewritten while a Pipeline still has that bank latched.
+        reset_backend();
+        task_id = PIPELINE_ID;
+        task_user_tag = 0;
+        task_flags = 0;
+        tani_delay = 30000;
+        gnn_delay = 30000;
+        admet_delay = 30000;
+        done_ready = 1'b1;
+        result_ready = 1'b1;
+        start_task(1);
+        for (word_index = 0; word_index < 1763; word_index = word_index + 1)
+            send_word(word_index, 1763);
+        payload_valid = 1'b0;
+        payload_last = 1'b0;
+        wait (launch_count == 1);
+        if (weight_run_bank !== 1'b0)
+            $fatal(1, "A: Pipeline did not latch initial weight bank");
+
+        task_id = `MOL_DMA_TASK_WEIGHT_RELOAD;
+        task_user_tag = 32'h8dba_7a56;
+        start_task(1);
+        for (word_index = 0; word_index < 4538; word_index = word_index + 1)
+            send_word(word_index, 4538);
+        payload_valid = 1'b0;
+        payload_last = 1'b0;
+        begin : first_reload_wait
+            repeat (20000) begin
+                @(posedge clk);
+                if (weight_run_bank === 1'b1)
+                    disable first_reload_wait;
+            end
+            $fatal(1, "A: first reload did not activate bank1");
+        end
+        if (!gnn_busy || !admet_busy)
+            $fatal(1, "A: Pipeline cores ended before bank1 activation");
+
+        @(negedge clk);
+        task_valid = 1'b1;
+        repeat (8) begin
+            @(negedge clk);
+            if (task_ready !== 1'b0 || gnn_weight_we || admet_cfg_we)
+                $fatal(1, "A RED: reload accepted/wrote bank still used by Pipeline");
+        end
+        tani_countdown = 1;
+        gnn_countdown = 1;
+        admet_countdown = 1;
+        begin : target_release_wait
+            repeat (30) begin
+                @(negedge clk);
+                if (task_ready === 1'b1)
+                    disable target_release_wait;
+            end
+            $fatal(1, "A: reload stayed blocked after target bank was released");
+        end
+        @(posedge clk);
+        @(negedge clk);
+        task_valid = 1'b0;
+        writes_before = reload_weight_write_count;
+        send_word(0, 4538);
+        payload_valid = 1'b0;
+        begin : post_release_write_wait
+            repeat (8) begin
+                @(posedge clk);
+                if (reload_weight_write_count > writes_before)
+                    disable post_release_write_wait;
+            end
+        end
+        if (reload_weight_write_count <= writes_before)
+            $fatal(1, "A: accepted reload did not write after bank release");
+        abort = 1'b1;
+        @(posedge clk);
+        @(negedge clk);
+        abort = 1'b0;
 
         // Abort clears every ping-pong latch. Late core-valid pulses cannot
         // recreate a completion or a result.
