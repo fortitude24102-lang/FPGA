@@ -21,7 +21,8 @@ network weight reload; Tanimoto remains available when weights are not ready.
   queueing, weight readiness, and accelerator dispatch.
 - `mol_tcp_protocol.c/.h`: framed TCP stream parser and task-to-DMA mapping.
 - `mol_dma_protocol.h`: shared wire-format constants.
-- `mol_dma_queue.c/.h`: packet builder, result parser, and DMA polling driver.
+- `mol_dma_queue.c/.h`: packet builder, result parser, interrupt-driven DMA
+  driver, and measured interrupt/polling API counters.
 - `accelerator.c/.h`: AXI-Lite control and reference weight setup.
 - `platform.c/.h`: standalone platform initialization.
 
@@ -52,6 +53,13 @@ in `reports/dma_batch/board-results.txt`.
 
 ## Create or rebuild the TCP service
 
+The exact clean-checkout Vivado, formal-gate, artifact-copy, Vitis, and
+programming commands are documented in
+`D:/FPGA/docs/TCP服务使用说明.md`. The implemented clock plan is 100 MHz for
+accelerator control/compute and the approved 125 MHz fallback for HP0/DMA/AXIS;
+the formal gate requires exact 10.000 ns and 8.000 ns clocks with positive
+setup and hold slack.
+
 From the Vitis 2019.2 XSCT console:
 
 ```tcl
@@ -71,7 +79,32 @@ run the Release service with:
 source D:/FPGA/FPGA/program_tcp_service.tcl
 ```
 
-The serial terminal must show `PHY address: 7`,
-`TCP server: 192.168.1.10:5001`, and `weights_ready=1` before weighted requests
-are sent. Connect the host Ethernet adapter to `192.168.1.x/24`; the client and
-full board acceptance commands are documented in `D:/FPGA/docs/TCP服务使用说明.md`.
+Hardware connections required for board acceptance are JTAG, PS UART0 through
+a 3.3 V USB-UART adapter, and board Ethernet through a host Ethernet adapter.
+Configure the host adapter as `192.168.1.2/24`; do not configure a gateway on
+this direct link. Open UART at 115200-8-N-1 before programming so the startup
+banner is captured.
+
+The serial terminal must show all of the following before weighted requests
+are sent:
+
+```text
+PHY address: 7
+TCP server: 192.168.1.10:5001
+DMA mode: interrupt
+weights_ready=1 epoch=1
+```
+
+Run the reproducible host acceptance sequence from `D:/FPGA`:
+
+```powershell
+py -3 software/host/mol_tcp_client.py --host 192.168.1.10 selftest
+py -3 software/host/mol_tcp_client.py --host 192.168.1.10 queue-test
+py -3 software/host/mol_tcp_client.py --host 192.168.1.10 reload test_data/selftest_weights.bin
+py -3 software/host/mol_tcp_client.py --host 192.168.1.10 selftest
+```
+
+During each hardware transfer UART prints `DMA_IRQ_COUNTS ... polling=0`, which
+is the runtime evidence that the DMA completion path is interrupt-driven. The
+full cabling, build, recovery, and acceptance procedure is in
+`D:/FPGA/docs/TCP服务使用说明.md`.

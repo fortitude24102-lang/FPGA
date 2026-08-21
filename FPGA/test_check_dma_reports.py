@@ -24,11 +24,11 @@ GOOD_METRICS = {
     "bram_used": "20",
     "bram_available": "95",
     "clock_100_present": "1",
-    "clock_150_present": "1",
+    "clock_125_present": "1",
     "clock_100_wns": "0.100",
     "clock_100_whs": "0.050",
-    "clock_150_wns": "0.020",
-    "clock_150_whs": "0.010",
+    "clock_125_wns": "0.020",
+    "clock_125_whs": "0.010",
     "global_wns": "0.020",
     "global_whs": "0.010",
     "bitstream_exists": "1",
@@ -73,10 +73,13 @@ class DmaReportGateTests(unittest.TestCase):
         self.assertEqual(gate_report_directory(self.make_reports()), [])
 
     def test_rejects_negative_setup_slack(self) -> None:
-        self.assert_rejected("clock_150_wns", "-0.001", "clock_150_wns")
+        self.assert_rejected("clock_125_wns", "-0.001", "clock_125_wns")
 
     def test_rejects_negative_hold_slack(self) -> None:
         self.assert_rejected("clock_100_whs", "-0.002", "clock_100_whs")
+
+    def test_rejects_zero_slack(self) -> None:
+        self.assert_rejected("clock_125_whs", "0.000", "clock_125_whs")
 
     def test_rejects_drc_errors(self) -> None:
         self.assert_rejected("drc_errors", "1", "drc_errors")
@@ -84,8 +87,8 @@ class DmaReportGateTests(unittest.TestCase):
     def test_rejects_dsp_over_project_limit(self) -> None:
         self.assert_rejected("dsp_used", "81", "project limit 80")
 
-    def test_rejects_missing_150_mhz_clock(self) -> None:
-        self.assert_rejected("clock_150_present", "0", "clock_150_present")
+    def test_rejects_missing_125_mhz_clock(self) -> None:
+        self.assert_rejected("clock_125_present", "0", "clock_125_present")
 
     def test_rejects_unrouted_design(self) -> None:
         self.assert_rejected("route_complete", "0", "route_complete")

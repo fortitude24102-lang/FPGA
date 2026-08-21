@@ -76,10 +76,14 @@ update_compile_order -fileset sources_1
 # Custom IP sources can change without Vivado invalidating an already complete
 # block-design OOC run.  Reset and rebuild the accelerator DCP explicitly so a
 # production candidate can never silently reuse stale RTL.
-set accel_ooc_runs [get_runs -quiet -filter \
-    {NAME =~ "system_generator_accelerator_*_synth_1"}]
-if {[llength $accel_ooc_runs] == 0} {
-    error "accelerator OOC synthesis run was not found"
+set accel_ips [get_ips -quiet -filter \
+    {NAME =~ "system_generator_accelerator_*"}]
+if {[llength $accel_ips] != 1} {
+    error "expected one current accelerator IP, found [llength $accel_ips]"
+}
+set accel_ooc_runs [get_runs -quiet "[get_property NAME $accel_ips]_synth_1"]
+if {[llength $accel_ooc_runs] != 1} {
+    error "current accelerator OOC synthesis run was not found"
 }
 foreach accel_ooc_run $accel_ooc_runs {
     puts "RESET_ACCELERATOR_OOC=[get_property NAME $accel_ooc_run]"
@@ -155,13 +159,13 @@ set global_wns [get_property SLACK $global_setup]
 set global_whs [get_property SLACK $global_hold]
 
 set clock100 [find_clock_with_period 10.000 0.010]
-set clock150 [find_clock_with_period 6.667 0.010]
+set clock125 [find_clock_with_period 8.000 0.010]
 set clock100_present [expr {$clock100 ne "" ? 1 : 0}]
-set clock150_present [expr {$clock150 ne "" ? 1 : 0}]
+set clock125_present [expr {$clock125 ne "" ? 1 : 0}]
 set clock100_wns [worst_slack_for_clock $clock100 max]
 set clock100_whs [worst_slack_for_clock $clock100 min]
-set clock150_wns [worst_slack_for_clock $clock150 max]
-set clock150_whs [worst_slack_for_clock $clock150 min]
+set clock125_wns [worst_slack_for_clock $clock125 max]
+set clock125_whs [worst_slack_for_clock $clock125 min]
 
 set utilization_text [report_utilization -return_string]
 foreach {resource pattern} {
@@ -194,11 +198,11 @@ write_metric $metrics ff_available 92400
 write_metric $metrics bram_used $bram_used
 write_metric $metrics bram_available 95
 write_metric $metrics clock_100_present $clock100_present
-write_metric $metrics clock_150_present $clock150_present
+write_metric $metrics clock_125_present $clock125_present
 write_metric $metrics clock_100_wns $clock100_wns
 write_metric $metrics clock_100_whs $clock100_whs
-write_metric $metrics clock_150_wns $clock150_wns
-write_metric $metrics clock_150_whs $clock150_whs
+write_metric $metrics clock_125_wns $clock125_wns
+write_metric $metrics clock_125_whs $clock125_whs
 write_metric $metrics global_wns $global_wns
 write_metric $metrics global_whs $global_whs
 write_metric $metrics bitstream_exists [expr {[file exists $candidate_bit] ? 1 : 0}]

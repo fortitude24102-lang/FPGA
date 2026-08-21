@@ -39,10 +39,13 @@ FPGA/FPGA.srcs/sources_1/bd/system/*_ooc.xdc
 # Candidate and diagnostic products created by rebuild/report scripts
 artifacts/candidate_dma_batch/
 artifacts/system_wrapper_tcp_service.*
+artifacts/accelerator_tcp_server.elf
+artifacts/selftest_weights.bin
 artifacts/experimental_failed/
 reports/experimental_failed/
 reports/candidate_dma_batch/
 reports/*_render*/
+reports/tcp_service/*-live.txt
 
 # Keep only the reproducible IP configuration from generated IP source trees.
 FPGA/FPGA.srcs/sources_1/ip/*/*

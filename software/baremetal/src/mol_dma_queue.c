@@ -626,6 +626,8 @@ int mol_dma_device_init(mol_dma_device_t *device, uint16_t device_id,
     device->irqs_connected = 0U;
     device->mm2s_irq_count = 0U;
     device->s2mm_irq_count = 0U;
+    device->irq_transfer_count = 0U;
+    device->polling_transfer_count = 0U;
     config = XAxiDma_LookupConfig((uint32_t)device_id);
     if (config == NULL) {
         return MOL_DMA_ERR_HARDWARE;
@@ -796,6 +798,8 @@ int mol_dma_transfer_irq_ex(mol_dma_device_t *device,
         return MOL_DMA_ERR_RANGE;
     }
 
+    device->irq_transfer_count += 1U;
+
     device->last_tx_flush_ticks = 0U;
     device->last_rx_flush_ticks = 0U;
     device->last_engine_ticks = 0U;
@@ -864,6 +868,9 @@ int mol_dma_transfer_poll_ex(mol_dma_device_t *device,
                              uint32_t poll_limit, size_t *response_bytes,
                              uint32_t transfer_flags)
 {
+    if (device != NULL) {
+        device->polling_transfer_count += 1U;
+    }
     return mol_dma_transfer_irq_ex(device, tx_buffer, tx_bytes,
                                    rx_buffer, rx_capacity_bytes,
                                    expected_batch_id, poll_limit,

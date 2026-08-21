@@ -121,6 +121,8 @@ typedef struct {
     uint32_t s2mm_irq_id;
     uint32_t mm2s_irq_count;
     uint32_t s2mm_irq_count;
+    uint32_t irq_transfer_count;
+    uint32_t polling_transfer_count;
     uint32_t last_mm2s_status;
     uint32_t last_s2mm_status;
     uint64_t last_tx_flush_ticks;

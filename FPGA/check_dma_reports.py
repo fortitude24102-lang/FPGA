@@ -35,11 +35,11 @@ REQUIRED_KEYS = (
     "bram_used",
     "bram_available",
     "clock_100_present",
-    "clock_150_present",
+    "clock_125_present",
     "clock_100_wns",
     "clock_100_whs",
-    "clock_150_wns",
-    "clock_150_whs",
+    "clock_125_wns",
+    "clock_125_whs",
     "global_wns",
     "global_whs",
     "bitstream_exists",
@@ -112,7 +112,7 @@ def gate_report_directory(report_dir: Path) -> list[str]:
             failures.append(f"metric {key} is not numeric: {metrics[key]}")
             return float("nan")
 
-    for key in ("route_complete", "clock_100_present", "clock_150_present",
+    for key in ("route_complete", "clock_100_present", "clock_125_present",
                 "bitstream_exists", "xsa_exists"):
         if number(key) != 1.0:
             failures.append(f"{key} must equal 1")
@@ -122,10 +122,10 @@ def gate_report_directory(report_dir: Path) -> list[str]:
             failures.append(f"{key} must equal 0 (got {metrics[key]})")
 
     for key in ("clock_100_wns", "clock_100_whs",
-                "clock_150_wns", "clock_150_whs",
+                "clock_125_wns", "clock_125_whs",
                 "global_wns", "global_whs"):
-        if number(key) < 0.0:
-            failures.append(f"{key} is negative ({metrics[key]} ns)")
+        if number(key) <= 0.0:
+            failures.append(f"{key} is not positive ({metrics[key]} ns)")
 
     dsp_used = number("dsp_used")
     if dsp_used > 80.0:

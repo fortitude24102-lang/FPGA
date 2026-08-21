@@ -1,0 +1,70 @@
+Z15 interrupt/reload/TCP service board verification
+Date: 2026-08-21
+Board network: 192.168.1.10/24, TCP 5001
+Host network: 192.168.1.2/24, direct 1 Gbps link
+UART: PS UART0 MIO14/MIO15, COM3, 115200-8-N-1
+
+Programming and startup
+- Final 125 MHz system_wrapper_tcp_service.bit programmed successfully through FTDI JTAG.
+- Final accelerator_tcp_server Release ELF downloaded to Cortex-A9 #0 and started.
+- PHY address 7 negotiated 1000 Mbps.
+- TCP server started at 192.168.1.10:5001.
+- Startup weights_ready=1 epoch=1.
+- DMA_IRQ_COUNTS began at mm2s=1 s2mm=1 polling=0.
+
+Initial TCP selftest
+trace=1 status=OK words=1 latency_ms=2.077 results=0x00010000
+trace=2 status=OK words=1 latency_ms=3.326 results=0x00000000
+trace=3 status=OK words=1 latency_ms=3.413 results=0x00005555
+trace=4 status=OK words=1 latency_ms=6.723 results=0x00000100
+trace=5 status=OK words=4 latency_ms=1.528 results=0x000000BB 0x000000BB 0x000000BB 0x000000BB
+trace=6 status=OK words=4 latency_ms=6.483 results=0x000000BB 0x000000BB 0x000000BB 0x000000BB
+ALL TCP SELF-TESTS PASSED
+
+Five-connection / eight-entry FIFO saturation
+QUEUE TEST PASSED accepted=[7100, 7101, 7102, 7103, 7104, 7105, 7106, 7107] busy=[7108, 7109]
+
+Deterministic hot reload
+- Payload: test_data/selftest_weights.bin
+- Bytes: 18152
+- SHA256: 6BA7274DC05AB5044E924388514F5065083665842DC589E28385291BE7B00570
+trace=589390305 status=OK words=1 latency_ms=19.826 results=0x00000002
+UART: WEIGHTS_RELOAD ready=1 epoch=2 trace=589390305
+
+Post-reload TCP selftest
+trace=1 status=OK words=1 latency_ms=1.602 results=0x00010000
+trace=2 status=OK words=1 latency_ms=1.429 results=0x00000000
+trace=3 status=OK words=1 latency_ms=3.730 results=0x00005555
+trace=4 status=OK words=1 latency_ms=6.474 results=0x00000100
+trace=5 status=OK words=4 latency_ms=1.977 results=0x000000BB 0x000000BB 0x000000BB 0x000000BB
+trace=6 status=OK words=4 latency_ms=6.485 results=0x000000BB 0x000000BB 0x000000BB 0x000000BB
+ALL TCP SELF-TESTS PASSED
+
+Recovery and connection lifecycle
+- Disconnect/reconnect Tanimoto: trace=589408937, 1.727 ms, result=0x00010000.
+- Five clients each sent one partial-header byte and remained idle for 35 seconds.
+- UART emitted TCP_IDLE_CLOSE for all five slots; a sixth client then completed normally in 1.620 ms.
+- A malformed all-zero frame was rejected; the following normal request completed in 2.323 ms.
+- Response parser unit tests accept the documented fallback flag and reject reserved/inconsistent flags and mismatched echoed batch sizes.
+
+DMA interrupt evidence during TCP acceptance
+- UART MM2S/S2MM counters increased monotonically from 1/1 to 25/25.
+- Every captured transfer reported the measured polling API count as 0.
+
+125 MHz DMA/batch performance revalidation
+BANDWIDTH direction=MM2S bytes=2097152 us=2103 MBps=997.21
+BANDWIDTH direction=S2MM bytes=2097152 us=2099 MBps=999.11
+PERF name=tanimoto_shared64 tasks=64 us=33 MBps=264.72 speedup=20.00
+PERF name=gnn_summary_full tasks=2 us=797 MBps=33.19 speedup=33.80
+PERF name=admet64 tasks=64 us=99 MBps=63.67 speedup=20.68
+PERF name=pipeline_modes tasks=3 us=1088 MBps=31.52 speedup=37.24
+PASS: DMA stress batches=1000 hash=0x96FF4BF5
+DMA_IRQ_COUNTS mm2s=1012 s2mm=1012 polling=0
+ALL DMA BATCH SELF-TESTS PASSED
+
+Final restoration check
+- TCP service was reprogrammed after the temporary DMA benchmark.
+- Ping: 2 sent, 2 received, 0% loss.
+- Final request: trace=589856764 status=OK words=1 latency_ms=2.014 results=0x00010000.
+
+FINAL RESULT: ALL TCP SERVICE AND 125 MHz PERFORMANCE ACCEPTANCE CHECKS PASSED

@@ -1,0 +1,63 @@
+Z15 interrupt/reload/TCP service build verification
+Date: 2026-08-21
+
+RTL regression
+- Command: py -3 sim/run_tests.py --test all
+- Result: PASS, 24 RTL testbenches + 1 protocol check
+
+Host unit tests
+- WSL: DMA driver 9/9 PASS
+- WSL: TCP codec/FIFO 4/4 PASS
+- WSL: reference weight packer 1/1 PASS
+- Windows: TCP host client 11/11 PASS
+- Windows: YT8531C PHY patch 2/2 PASS
+- Note: Windows MinGW gcc cannot CreateProcess in this environment, so C host tests were run under WSL; this is a host toolchain issue, not a test failure.
+
+Vivado 2019.2 production build
+- Accelerator OOC synthesis: PASS (current instance system_generator_accelerator_0_16)
+- Top synthesis/implementation/bitstream: PASS
+- Formal gate: py -3 FPGA/check_dma_reports.py reports/candidate_dma_batch/impl -> PASS
+- route_complete=1
+- unrouted_nets=0
+- drc_errors=0
+- methodology_errors=0
+- global_wns=0.031 ns
+- global_whs=0.023 ns
+- clock_100_present=1, period=10.000 ns, WNS=0.031 ns, WHS=0.023 ns
+- clock_125_present=1, period=8.000 ns, WNS=0.661 ns, WHS=0.033 ns
+- LUT: 31238 / 46200
+- FF: 16665 / 92400
+- BRAM: 21 / 95
+- DSP: 78 / 160
+
+Clock implementation disclosure
+- Enabling PS GEM0 fixes the shared IO PLL at 1000 MHz; that PLL cannot divide exactly to the original 150 MHz FCLK1 request.
+- The implemented design therefore uses the design-approved explicit fallback of 125 MHz for the HP0/DMA/AXIS domain.
+- The formal gate requires the exact 8.000 ns clock and positive setup/hold slack; it does not accept an implicit 142.857 MHz clock.
+- The 100 MHz accelerator control/compute domain is unchanged.
+
+Vitis 2019.2 TCP service
+- Debug ELF: PASS, text=129248 data=3488 bss=6347056
+- Release ELF: PASS, text=120060 data=3488 bss=6347056
+- BSP: standalone + lwIP 2.0.2 RAW API + generated-BSP-only YT8531C Clause 22 patch
+
+125 MHz board performance revalidation
+- MM2S: 997.21 MB/s (requirement >= 500 MB/s)
+- S2MM: 999.11 MB/s (requirement >= 500 MB/s)
+- Tanimoto shared-query N=64: 20.00x (requirement >= 20x)
+- GNN summary/full: 33.80x (requirement > 10x)
+- ADMET N=64: 20.68x (requirement > 20x)
+- Pipeline modes: 37.24x (requirement > 30x)
+- Stress: 1000 batches PASS, hash=0x96FF4BF5
+- DMA interrupt counters: mm2s=1012 s2mm=1012 polling=0
+
+Local generated artifacts (retained locally, not committed)
+- system_wrapper_tcp_service.bit SHA256 26A5E423B2C8C1F97DF9544F49446BEB16FE8C235287E3CF01065793025D3601
+- system_wrapper_tcp_service.xsa SHA256 FE1DA4CD5909DB85DAAE9AFE198244A457E82E6FFC40655643D0DA0B18558E3B
+- accelerator_tcp_server.elf SHA256 28C0BB1D75B8298ED8075C6B8279EC6779938B7104E1A7BC2DC9E72502417839
+- selftest_weights.bin SHA256 6BA7274DC05AB5044E924388514F5065083665842DC589E28385291BE7B00570
+
+Final board state
+- Final TCP bitstream and Release ELF were programmed after the temporary DMA benchmark.
+- Ping to 192.168.1.10 succeeded with 0% loss.
+- Final Tanimoto request returned 0x00010000 in 2.014 ms.

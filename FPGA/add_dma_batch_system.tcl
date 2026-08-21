@@ -34,6 +34,7 @@ foreach old_cell {
     axis_job_fifo
     axis_result_fifo
     rst_ps7_0_150M
+    rst_ps7_0_125M
     dma_irq_concat
 } {
     set object [get_bd_cells -quiet $old_cell]
@@ -56,7 +57,7 @@ set_property -dict [list \
     CONFIG.PCW_FPGA_FCLK0_ENABLE {1} \
     CONFIG.PCW_FPGA_FCLK1_ENABLE {1} \
     CONFIG.PCW_FPGA0_PERIPHERAL_FREQMHZ {100.000000} \
-    CONFIG.PCW_FPGA1_PERIPHERAL_FREQMHZ {150.000000} \
+    CONFIG.PCW_FPGA1_PERIPHERAL_FREQMHZ {125.000000} \
     CONFIG.PCW_EN_RST0_PORT {1} \
     CONFIG.PCW_EN_RST1_PORT {1} \
     CONFIG.PCW_USE_FABRIC_INTERRUPT {1} \
@@ -140,8 +141,8 @@ set mem_ic [create_bd_cell -type ip \
     -vlnv xilinx.com:ip:axi_interconnect:2.1 dma_mem_interconnect]
 set_property -dict [list CONFIG.NUM_SI {2} CONFIG.NUM_MI {1}] $mem_ic
 
-set rst150 [create_bd_cell -type ip \
-    -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_ps7_0_150M]
+set rst125 [create_bd_cell -type ip \
+    -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_ps7_0_125M]
 
 set irq_concat [create_bd_cell -type ip \
     -vlnv xilinx.com:ip:xlconcat:2.1 dma_irq_concat]
@@ -169,7 +170,7 @@ connect_bd_intf_net [get_bd_intf_pins $result_fifo/M_AXIS] \
 
 # Both 128-bit DMA memory masters are converted to native 64-bit HP0 AXI4,
 # then share the PS DDR port through a two-input AXI Interconnect.  The complete
-# memory fabric runs at 150 MHz.
+# memory fabric runs at the documented 125 MHz Ethernet-compatible fallback.
 connect_bd_intf_net [get_bd_intf_pins $dma/M_AXI_MM2S] \
     [get_bd_intf_pins $mm2s_dwidth/S_AXI]
 connect_bd_intf_net [get_bd_intf_pins $dma/M_AXI_S2MM] \
@@ -182,7 +183,7 @@ connect_bd_intf_net [get_bd_intf_pins $mem_ic/M00_AXI] \
     [get_bd_intf_pins $ps/S_AXI_HP0]
 
 set clk100 [get_bd_pins $ps/FCLK_CLK0]
-set clk150 [get_bd_pins $ps/FCLK_CLK1]
+set clk125 [get_bd_pins $ps/FCLK_CLK1]
 
 connect_bd_net $clk100 \
     [get_bd_pins $ps/M_AXI_GP0_ACLK] \
@@ -195,7 +196,7 @@ connect_bd_net $clk100 \
     [get_bd_pins $result_fifo/s_axis_aclk] \
     [get_bd_pins rst_ps7_0_100M/slowest_sync_clk]
 
-connect_bd_net $clk150 \
+connect_bd_net $clk125 \
     [get_bd_pins $ps/S_AXI_HP0_ACLK] \
     [get_bd_pins $dma/m_axi_mm2s_aclk] \
     [get_bd_pins $dma/m_axi_s2mm_aclk] \
@@ -207,29 +208,29 @@ connect_bd_net $clk150 \
     [get_bd_pins $mem_ic/S00_ACLK] \
     [get_bd_pins $mem_ic/S01_ACLK] \
     [get_bd_pins $mem_ic/M00_ACLK] \
-    [get_bd_pins $rst150/slowest_sync_clk]
+    [get_bd_pins $rst125/slowest_sync_clk]
 
-# Use the FCLK1 reset source associated with the 150 MHz memory domain.
+# Use the FCLK1 reset source associated with the 125 MHz memory domain.
 connect_bd_net [get_bd_pins $ps/FCLK_RESET1_N] \
-    [get_bd_pins $rst150/ext_reset_in]
+    [get_bd_pins $rst125/ext_reset_in]
 # This newly created proc_sys_reset instance has C_AUX_RESET_HIGH=0 in
 # Vivado 2019.2.  Tie aux_reset_in high (inactive); tying it to reset_const_0
-# permanently held the complete 150 MHz DMA/HP0 domain in reset on hardware.
+# permanently held the complete DMA/HP0 domain in reset on hardware.
 connect_bd_net [get_bd_pins reset_const_0/dout] \
-    [get_bd_pins $rst150/mb_debug_sys_rst]
+    [get_bd_pins $rst125/mb_debug_sys_rst]
 connect_bd_net [get_bd_pins reset_const_1/dout] \
-    [get_bd_pins $rst150/aux_reset_in] \
-    [get_bd_pins $rst150/dcm_locked]
+    [get_bd_pins $rst125/aux_reset_in] \
+    [get_bd_pins $rst125/dcm_locked]
 
 set reset100n [get_bd_pins rst_ps7_0_100M/peripheral_aresetn]
-set reset150n [get_bd_pins $rst150/peripheral_aresetn]
+set reset125n [get_bd_pins $rst125/peripheral_aresetn]
 connect_bd_net $reset100n \
     [get_bd_pins $legacy_bridge/aresetn] \
     [get_bd_pins $dma_bridge/aresetn] \
     [get_bd_pins $accel/s_axi_aresetn] \
     [get_bd_pins $dma/axi_resetn] \
     [get_bd_pins $result_fifo/s_axis_aresetn]
-connect_bd_net $reset150n \
+connect_bd_net $reset125n \
     [get_bd_pins $job_fifo/s_axis_aresetn] \
     [get_bd_pins $mm2s_dwidth/s_axi_aresetn] \
     [get_bd_pins $s2mm_dwidth/s_axi_aresetn] \

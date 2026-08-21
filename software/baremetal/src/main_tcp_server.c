@@ -21,6 +21,8 @@
 #define MOL_DMA_TIMEOUT_TICKS ((u64)COUNTS_PER_SECOND)
 #define MOL_DMA_TASK_TIMEOUT_CYCLES 20000000U
 #define MOL_TCP_DMA_BUFFER_BYTES MOL_DMA_MAX_TRANSFER_BYTES
+#define MOL_TCP_POLL_INTERVAL 2U
+#define MOL_TCP_IDLE_POLL_LIMIT 30U
 
 #ifndef XPAR_AXIDMA_0_DEVICE_ID
 #ifdef XPAR_AXI_DMA_0_DEVICE_ID
@@ -36,6 +38,7 @@ typedef struct {
     uint32_t generation;
     uint32_t active;
     uint32_t slot;
+    uint32_t idle_polls;
 } mol_tcp_connection_t;
 
 static struct netif server_netif;
@@ -149,6 +152,9 @@ static err_t send_frame(mol_tcp_connection_t *connection,
                     TCP_WRITE_FLAG_COPY);
     if (err == ERR_OK) {
         err = tcp_output(connection->pcb);
+        if (err == ERR_OK) {
+            connection->idle_polls = 0U;
+        }
     }
     return err;
 }
@@ -166,26 +172,71 @@ static err_t send_error(mol_tcp_connection_t *connection,
                       error_payload, sizeof(error_payload));
 }
 
-static void release_connection(mol_tcp_connection_t *connection,
-                               int abort_connection)
+static err_t release_connection(mol_tcp_connection_t *connection,
+                                int abort_connection)
 {
     struct tcp_pcb *pcb;
+    err_t close_rc;
 
     if (connection == NULL || connection->active == 0U) {
-        return;
+        return ERR_OK;
     }
     pcb = connection->pcb;
     connection->active = 0U;
     connection->pcb = NULL;
+    connection->idle_polls = 0U;
     mol_tcp_stream_init(&connection->stream);
     if (pcb == NULL) {
-        return;
+        return ERR_OK;
     }
     tcp_arg(pcb, NULL);
     tcp_recv(pcb, NULL);
     tcp_err(pcb, NULL);
-    if (abort_connection != 0 || tcp_close(pcb) != ERR_OK) {
+    tcp_poll(pcb, NULL, 0U);
+    if (abort_connection != 0) {
         tcp_abort(pcb);
+        return ERR_ABRT;
+    }
+    close_rc = tcp_close(pcb);
+    if (close_rc != ERR_OK) {
+        tcp_abort(pcb);
+        return ERR_ABRT;
+    }
+    return ERR_OK;
+}
+
+static void send_request_error(const mol_tcp_request_t *request,
+                               uint32_t error_code, uint32_t detail,
+                               uint8_t extra_flags)
+{
+    mol_tcp_connection_t *connection;
+
+    if (request == NULL ||
+        !connection_matches(request->connection_slot,
+                            request->connection_generation)) {
+        return;
+    }
+    connection = &connections[request->connection_slot];
+    if (send_error(connection, &request->header, error_code, detail,
+                   extra_flags) != ERR_OK) {
+        (void)release_connection(connection, 1);
+    }
+}
+
+static void send_request_result(const mol_tcp_request_t *request,
+                                const void *payload, uint32_t payload_len)
+{
+    mol_tcp_connection_t *connection;
+
+    if (request == NULL ||
+        !connection_matches(request->connection_slot,
+                            request->connection_generation)) {
+        return;
+    }
+    connection = &connections[request->connection_slot];
+    if (send_frame(connection, &request->header, 0U,
+                   payload, payload_len) != ERR_OK) {
+        (void)release_connection(connection, 1);
     }
 }
 
@@ -207,29 +258,33 @@ static err_t tcp_receive_callback(void *arg, struct tcp_pcb *pcb,
     struct pbuf *part;
     mol_tcp_header_t bad_header;
     int close_after_error = 0;
+    int abort_after_packet = 0;
     int parse_rc = MOL_TCP_OK;
 
     if (connection == NULL || connection->active == 0U) {
         if (packet != NULL) {
             pbuf_free(packet);
         }
-        return ERR_ARG;
+        if (pcb != NULL) {
+            tcp_abort(pcb);
+        }
+        return ERR_ABRT;
     }
     if (packet == NULL) {
-        release_connection(connection, 0);
-        return ERR_OK;
+        return release_connection(connection, 0);
     }
     if (err != ERR_OK) {
         pbuf_free(packet);
-        release_connection(connection, 1);
-        return err;
+        return release_connection(connection, 1);
     }
 
+    connection->idle_polls = 0U;
     tcp_recved(pcb, packet->tot_len);
     memset(&bad_header, 0, sizeof(bad_header));
     bad_header.batch_size = 1U;
 
-    for (part = packet; part != NULL && close_after_error == 0;
+    for (part = packet;
+         part != NULL && close_after_error == 0 && abort_after_packet == 0;
          part = part->next) {
         const uint8_t *bytes = (const uint8_t *)part->payload;
         size_t offset = 0U;
@@ -262,8 +317,8 @@ static err_t tcp_receive_callback(void *arg, struct tcp_pcb *pcb,
                                    MOL_TCP_ERROR_QUEUE_FULL,
                                    request_queue.count,
                                    MOL_TCP_FLAG_BUSY) != ERR_OK) {
-                        close_after_error = 1;
-                        parse_rc = MOL_TCP_ERR_STATE;
+                        abort_after_packet = 1;
+                        break;
                     }
                 } else if (queue_rc != MOL_TCP_OK) {
                     close_after_error = 1;
@@ -278,11 +333,35 @@ static err_t tcp_receive_callback(void *arg, struct tcp_pcb *pcb,
     }
     pbuf_free(packet);
 
+    if (abort_after_packet != 0) {
+        return release_connection(connection, 1);
+    }
+
     if (close_after_error != 0) {
-        (void)send_error(connection, &bad_header,
-                         parse_error_code(parse_rc),
-                         (uint32_t)(-parse_rc), 0U);
-        release_connection(connection, 0);
+        if (send_error(connection, &bad_header,
+                       parse_error_code(parse_rc),
+                       (uint32_t)(-parse_rc), 0U) != ERR_OK) {
+            return release_connection(connection, 1);
+        }
+        return release_connection(connection, 0);
+    }
+    return ERR_OK;
+}
+
+static err_t tcp_poll_callback(void *arg, struct tcp_pcb *pcb)
+{
+    mol_tcp_connection_t *connection = (mol_tcp_connection_t *)arg;
+
+    if (connection == NULL || connection->active == 0U ||
+        connection->pcb != pcb) {
+        tcp_abort(pcb);
+        return ERR_ABRT;
+    }
+    connection->idle_polls += 1U;
+    if (connection->idle_polls >= MOL_TCP_IDLE_POLL_LIMIT) {
+        xil_printf("TCP_IDLE_CLOSE slot=%u generation=%u\r\n",
+                   connection->slot, connection->generation);
+        return release_connection(connection, 1);
     }
     return ERR_OK;
 }
@@ -306,10 +385,12 @@ static err_t tcp_accept_callback(void *arg, struct tcp_pcb *new_pcb,
             connection->slot = slot;
             connection->pcb = new_pcb;
             connection->active = 1U;
+            connection->idle_polls = 0U;
             mol_tcp_stream_init(&connection->stream);
             tcp_arg(new_pcb, connection);
             tcp_recv(new_pcb, tcp_receive_callback);
             tcp_err(new_pcb, tcp_error_callback);
+            tcp_poll(new_pcb, tcp_poll_callback, MOL_TCP_POLL_INTERVAL);
             xil_printf("TCP_CONNECT slot=%u generation=%u\r\n",
                        slot, connection->generation);
             return ERR_OK;
@@ -367,6 +448,9 @@ static int execute_dma_task(uint8_t task_id, uint32_t trace_id,
         &dma_device, dma_tx, tx_bytes, dma_rx, rx_capacity, batch_id,
         MOL_DMA_TIMEOUT_TICKS, network_progress, &server_netif,
         &rx_bytes, 0U);
+    xil_printf("DMA_IRQ_COUNTS mm2s=%u s2mm=%u polling=%u\r\n",
+               dma_device.mm2s_irq_count, dma_device.s2mm_irq_count,
+               dma_device.polling_transfer_count);
     if (rc != MOL_DMA_OK) {
         return rc;
     }
@@ -411,7 +495,6 @@ static int initialize_reference_weights(void)
 
 static void dispatch_one_request(void)
 {
-    mol_tcp_connection_t *connection;
     mol_dma_result_view_t result;
     uint32_t dma_flags;
     uint32_t payload_words;
@@ -426,15 +509,13 @@ static void dispatch_one_request(void)
                             current_request.connection_generation)) {
         return;
     }
-    connection = &connections[current_request.connection_slot];
-
     if ((current_request.header.task_id == MOL_DMA_TASK_GNN ||
          current_request.header.task_id == MOL_DMA_TASK_ADMET ||
          current_request.header.task_id == MOL_DMA_TASK_PIPELINE) &&
         weights_ready == 0U) {
-        (void)send_error(connection, &current_request.header,
-                         MOL_TCP_ERROR_WEIGHTS_NOT_READY,
-                         weights_epoch, 0U);
+        send_request_error(&current_request,
+                           MOL_TCP_ERROR_WEIGHTS_NOT_READY,
+                           weights_epoch, 0U);
         return;
     }
 
@@ -444,8 +525,8 @@ static void dispatch_one_request(void)
     (void)dma_flags;
     if (rc != MOL_TCP_OK ||
         payload_words * 4U != current_request.payload_len) {
-        (void)send_error(connection, &current_request.header,
-                         MOL_TCP_ERROR_INTERNAL, (uint32_t)(-rc), 0U);
+        send_request_error(&current_request, MOL_TCP_ERROR_INTERNAL,
+                           (uint32_t)(-rc), 0U);
         return;
     }
 
@@ -461,11 +542,11 @@ static void dispatch_one_request(void)
     if (rc != MOL_DMA_OK) {
         if (current_request.header.task_id == MOL_DMA_TASK_WEIGHT_RELOAD) {
             reload_in_progress = 0U;
-            (void)send_error(connection, &current_request.header,
-                             MOL_TCP_ERROR_RELOAD, (uint32_t)(-rc), 0U);
+            send_request_error(&current_request, MOL_TCP_ERROR_RELOAD,
+                               (uint32_t)(-rc), 0U);
         } else {
-            (void)send_error(connection, &current_request.header,
-                             MOL_TCP_ERROR_DMA, (uint32_t)(-rc), 0U);
+            send_request_error(&current_request, MOL_TCP_ERROR_DMA,
+                               (uint32_t)(-rc), 0U);
         }
         return;
     }
@@ -477,11 +558,8 @@ static void dispatch_one_request(void)
         xil_printf("WEIGHTS_RELOAD ready=1 epoch=%u trace=%u\r\n",
                    weights_epoch, current_request.header.trace_id);
     }
-    if (connection_matches(current_request.connection_slot,
-                           current_request.connection_generation)) {
-        (void)send_frame(connection, &current_request.header, 0U,
-                         result.payload, result.result_words * 4U);
-    }
+    send_request_result(&current_request, result.payload,
+                        result.result_words * 4U);
 }
 
 static int initialize_network(void)
@@ -557,6 +635,7 @@ int main(void)
     (void)initialize_reference_weights();
     xil_printf("PHY address: 7\r\n");
     xil_printf("TCP server: 192.168.1.10:5001\r\n");
+    xil_printf("DMA mode: interrupt\r\n");
     xil_printf("weights_ready=%u epoch=%u\r\n",
                weights_ready, weights_epoch);
 

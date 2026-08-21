@@ -2,7 +2,7 @@
 
 `mol_tcp_client.py` is a deterministic, standard-library-only Windows client
 for the bare-metal service at `192.168.1.10:5001`. Configure the PC Ethernet
-adapter to an unused address such as `192.168.1.20`, subnet mask
+adapter to `192.168.1.2`, subnet mask
 `255.255.255.0`; no gateway or DNS is required for the direct cable.
 
 ## Acceptance commands
@@ -10,6 +10,8 @@ adapter to an unused address such as `192.168.1.20`, subnet mask
 ```powershell
 py -3 software/host/mol_tcp_client.py --host 192.168.1.10 selftest
 py -3 software/host/mol_tcp_client.py --host 192.168.1.10 queue-test
+py -3 software/host/mol_tcp_client.py --host 192.168.1.10 reload test_data/selftest_weights.bin
+py -3 software/host/mol_tcp_client.py --host 192.168.1.10 selftest
 ```
 
 `selftest` checks three exact Tanimoto results, GNN, all four ADMET outputs,
@@ -31,7 +33,13 @@ Every successful request displays its trace ID, result word count, wall-clock
 latency, and hexadecimal result words. Server busy and error responses exit
 nonzero and report their numeric code and detail.
 
-## Rebuild the reload image
+`selftest_weights.bin` exactly matches the sparse deterministic weights loaded
+at service startup, so it is the canonical hot-reload acceptance image.
+`reference_weights.bin` contains the synthetic dataset's complete GNN/ADMET
+model; loading it intentionally changes GNN, ADMET, and Pipeline outputs and
+must not be followed by the fixed-output `selftest`.
+
+## Rebuild the dataset model image
 
 ```powershell
 py -3 software/host/mol_tcp_client.py pack-weights `
@@ -48,3 +56,7 @@ Run the local codec suite without a board:
 ```powershell
 py -3 software/host/test_mol_tcp_client.py
 ```
+
+The suite currently contains 11 deterministic tests, including acceptance of
+the documented fallback response flag and rejection of
+reserved/inconsistent response flags and mismatched echoed batch sizes.

@@ -59,7 +59,7 @@ foreach name {
     axis_job_fifo
     axis_result_fifo
     rst_ps7_0_100M
-    rst_ps7_0_150M
+    rst_ps7_0_125M
     dma_irq_concat
 } {
     check_cell $name
@@ -83,8 +83,8 @@ if {[llength $ps] == 1} {
         }
     }
     set fclk1_mhz [get_property CONFIG.PCW_FPGA1_PERIPHERAL_FREQMHZ $ps]
-    if {![string match "150.*" $fclk1_mhz]} {
-        lappend failures "FCLK1 is not configured for 150 MHz (got $fclk1_mhz)"
+    if {![string match "125.*" $fclk1_mhz]} {
+        lappend failures "FCLK1 is not configured for 125 MHz (got $fclk1_mhz)"
     }
 }
 
@@ -134,12 +134,12 @@ foreach pin {
 check_pin_net dma_irq_concat/dout processing_system7_0/IRQ_F2P
 check_pin_net axi_dma_0/mm2s_introut dma_irq_concat/In0
 check_pin_net axi_dma_0/s2mm_introut dma_irq_concat/In1
-check_pin_net rst_ps7_0_150M/ext_reset_in processing_system7_0/FCLK_RESET1_N
-check_pin_net rst_ps7_0_150M/aux_reset_in reset_const_1/dout
-set rst150_cell [get_bd_cells -quiet rst_ps7_0_150M]
-if {[llength $rst150_cell] == 1 &&
-    [get_property CONFIG.C_AUX_RESET_HIGH $rst150_cell] ne "0"} {
-    lappend failures "rst_ps7_0_150M auxiliary reset is not active-low"
+check_pin_net rst_ps7_0_125M/ext_reset_in processing_system7_0/FCLK_RESET1_N
+check_pin_net rst_ps7_0_125M/aux_reset_in reset_const_1/dout
+set rst125_cell [get_bd_cells -quiet rst_ps7_0_125M]
+if {[llength $rst125_cell] == 1 &&
+    [get_property CONFIG.C_AUX_RESET_HIGH $rst125_cell] ne "0"} {
+    lappend failures "rst_ps7_0_125M auxiliary reset is not active-low"
 }
 foreach pin {
     dma_ctrl_protocol_converter/aresetn
@@ -158,7 +158,7 @@ foreach pin {
     dma_mem_interconnect/S01_ARESETN
     dma_mem_interconnect/M00_ARESETN
 } {
-    check_pin_net $pin rst_ps7_0_150M/peripheral_aresetn
+    check_pin_net $pin rst_ps7_0_125M/peripheral_aresetn
 }
 
 set dma [get_bd_cells -quiet axi_dma_0]

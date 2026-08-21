@@ -16,6 +16,7 @@ MAX_PAYLOAD_BYTES = 24576
 FLAG_RESPONSE = 0x01
 FLAG_BUSY = 0x02
 FLAG_ERROR = 0x04
+FLAG_FALLBACK = 0x08
 
 TASK_TANIMOTO = 0x00
 TASK_GNN = 0x01
@@ -109,7 +110,7 @@ def recv_exact(connection, size):
     return bytes(chunks)
 
 
-def receive_response(connection, expected_task, expected_trace):
+def receive_response(connection, expected_task, expected_trace, expected_batch):
     raw_header = recv_exact(connection, HEADER_BYTES)
     magic, version, task_id, flags, length, trace_id, batch_size = HEADER.unpack(
         raw_header
@@ -118,10 +119,15 @@ def receive_response(connection, expected_task, expected_trace):
         raise ProtocolError("bad response magic or version")
     if not flags & FLAG_RESPONSE:
         raise ProtocolError("frame is not a response")
+    allowed_flags = FLAG_RESPONSE | FLAG_BUSY | FLAG_ERROR | FLAG_FALLBACK
+    if flags & ~allowed_flags or (flags & FLAG_BUSY and not flags & FLAG_ERROR):
+        raise ProtocolError("invalid response flags")
     if task_id != expected_task:
         raise ProtocolError("response task mismatch")
     if expected_trace is not None and trace_id != expected_trace:
         raise ProtocolError("response trace mismatch")
+    if batch_size != expected_batch:
+        raise ProtocolError("response batch mismatch")
     if length > MAX_PAYLOAD_BYTES or length % 4:
         raise ProtocolError("invalid response payload length")
     payload = recv_exact(connection, length)
@@ -150,7 +156,7 @@ def request(host, task_id, payload, batch_size, trace_id, port=PORT,
     try:
         connection.settimeout(timeout)
         send_request(connection, task_id, payload, batch_size, trace_id)
-        response = receive_response(connection, task_id, trace_id)
+        response = receive_response(connection, task_id, trace_id, batch_size)
         response.seconds = time.perf_counter() - start
         return response
     finally:
@@ -278,20 +284,20 @@ def run_queue_test(args):
             connection.settimeout(args.timeout)
         send_request(connections[0], TASK_GNN, gnn_payload(), 1, 7000)
         traces = list(range(7100, 7110))
+        payload = admet_payload()
         frame = b"".join(
-            pack_header(TASK_TANIMOTO, 0, 256, trace, 1)
-            + tanimoto_payload(0xFFFFFFFF, 0xFFFFFFFF)
+            pack_header(TASK_ADMET, 0, len(payload), trace, 1) + payload
             for trace in traces
         )
         connections[1].sendall(frame)
-        receive_response(connections[0], TASK_GNN, 7000)
+        receive_response(connections[0], TASK_GNN, 7000, 1)
 
         accepted = []
         busy = []
         for _ in traces:
             try:
                 response = receive_response(
-                    connections[1], TASK_TANIMOTO, None
+                    connections[1], TASK_ADMET, None, 1
                 )
                 accepted.append(response.trace_id)
             except ServerError as error:
