@@ -758,15 +758,15 @@ module dma_accelerator_lane_controller #(
     localparam [3:0] ST_WAIT_SHARED   = 4'd3;
     localparam [3:0] ST_WAIT_GNN      = 4'd4;
     localparam [3:0] ST_WAIT_ADMET    = 4'd5;
-    localparam [3:0] ST_PIPE_TANI     = 4'd6;
-    localparam [3:0] ST_PIPE_GNN      = 4'd7;
-    localparam [3:0] ST_PIPE_ADMET    = 4'd8;
+    localparam [3:0] ST_PIPE_WAIT     = 4'd6;
     localparam [3:0] ST_DONE          = 4'd9;
     localparam [3:0] ST_RESULT        = 4'd10;
     localparam [3:0] ST_GNN_READ_WAIT = 4'd11;
     localparam [3:0] ST_START_TANI    = 4'd12;
     localparam [3:0] ST_RELOAD_LOW    = 4'd13;
     localparam [3:0] ST_RELOAD_HIGH   = 4'd14;
+    localparam [23:0] STATUS_INTERNAL_ERROR =
+        `MOL_DMA_STATUS_INTERNAL_ERROR;
 
     reg [3:0] state;
     reg [7:0] active_task;
@@ -842,7 +842,7 @@ module dma_accelerator_lane_controller #(
         ((state == ST_WAIT_SHARED) && shared_mode &&
          (payload_index < shared_payload_words));
     assign done_valid = (state == ST_DONE);
-    assign done_status = unsupported_mode ? 24'd11 : 24'd0;
+    assign done_status = unsupported_mode ? STATUS_INTERNAL_ERROR : 24'd0;
     assign done_result_words = result_words_reg;
     assign done_detail = unsupported_mode ? 32'h4655_4c4c : 32'd0;
     assign done_sequence = 6'd0;
@@ -1080,7 +1080,33 @@ module dma_accelerator_lane_controller #(
 
             if (abort) begin
                 state <= ST_IDLE;
+                active_task <= 0;
+                active_flags <= 0;
+                active_items <= 0;
+                payload_index <= 0;
+                admet_item_index <= 0;
+                result_words_reg <= 0;
+                result_index <= 0;
+                result_data_reg <= 0;
                 result_valid_reg <= 1'b0;
+                gnn_read_wait <= 0;
+                pipeline_done_mask <= 3'b000;
+                input_bank_occupied <= 2'b00;
+                input_bank_ready <= 2'b00;
+                input_bank_loading <= 1'b0;
+                input_compute_running <= 1'b0;
+                summary_capture_pending <= 1'b0;
+                summary_capture_wait <= 2'd0;
+                item_payload_index <= 11'd0;
+                loaded_items <= 6'd0;
+                completed_items <= 6'd0;
+                run_item_index <= 6'd0;
+                bank_item_index[0] <= 6'd0;
+                bank_item_index[1] <= 6'd0;
+                input_write_bank_reg <= 1'b0;
+                input_write_port_bank_reg <= 1'b0;
+                input_run_bank_reg <= 1'b0;
+                unsupported_mode <= 1'b0;
             end else begin
                 if (ping_pong_mode && input_compute_running &&
                     !summary_capture_pending) begin
@@ -1125,24 +1151,35 @@ module dma_accelerator_lane_controller #(
                             else
                                 result_words_reg <= {25'd0, active_items};
                             state <= ST_DONE;
-                        end else if (input_bank_ready[~input_run_bank_reg]) begin
-                            input_run_bank_reg <= ~input_run_bank_reg;
-                            input_write_bank_reg <= input_run_bank_reg;
-                            run_item_index <=
-                                bank_item_index[~input_run_bank_reg];
-                            input_bank_ready[~input_run_bank_reg] <= 1'b0;
-                            pipeline_done_mask <= 3'b000;
-                            input_compute_running <= 1'b1;
-                            if (active_task == `MOL_DMA_TASK_PIPELINE) begin
-                                tanimoto_start_reg <= 1'b1;
-                                gnn_start_reg <= 1'b1;
-                                admet_start_reg <= 1'b1;
-                            end else begin
-                                gnn_start_reg <= 1'b1;
-                            end
                         end else begin
                             input_compute_running <= 1'b0;
                         end
+                    end
+                end
+
+                if (ping_pong_mode && !input_compute_running &&
+                    !summary_capture_pending && input_bank_ready != 0 &&
+                    (state == ST_LOAD || state == ST_WAIT_GNN ||
+                     state == ST_PIPE_WAIT)) begin
+                    input_compute_running <= 1'b1;
+                    pipeline_done_mask <= 3'b000;
+                    if (input_bank_ready[0]) begin
+                        input_run_bank_reg <= 1'b0;
+                        input_write_bank_reg <= 1'b1;
+                        run_item_index <= bank_item_index[0];
+                        input_bank_ready[0] <= 1'b0;
+                    end else begin
+                        input_run_bank_reg <= 1'b1;
+                        input_write_bank_reg <= 1'b0;
+                        run_item_index <= bank_item_index[1];
+                        input_bank_ready[1] <= 1'b0;
+                    end
+                    if (active_task == `MOL_DMA_TASK_PIPELINE) begin
+                        tanimoto_start_reg <= 1'b1;
+                        gnn_start_reg <= 1'b1;
+                        admet_start_reg <= 1'b1;
+                    end else begin
+                        gnn_start_reg <= 1'b1;
                     end
                 end
 
@@ -1175,7 +1212,8 @@ module dma_accelerator_lane_controller #(
                             input_write_port_bank_reg <= 1'b0;
                             input_run_bank_reg <= 1'b0;
                             unsupported_mode <=
-                                task_id == `MOL_DMA_TASK_PIPELINE &&
+                                (task_id == `MOL_DMA_TASK_PIPELINE ||
+                                 task_id == `MOL_DMA_TASK_GNN) &&
                                 (task_flags & `MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0 &&
                                 task_item_count > 1;
                             state <= ST_LOAD;
@@ -1316,7 +1354,7 @@ module dma_accelerator_lane_controller #(
                                                 input_write_bank_reg] <= 1'b1;
                                         end
                                         if (payload_last)
-                                            state <= ST_PIPE_TANI;
+                                            state <= ST_PIPE_WAIT;
                                     end else begin
                                         item_payload_index <=
                                             item_payload_index + 1'b1;
@@ -1356,13 +1394,7 @@ module dma_accelerator_lane_controller #(
 
                     ST_START_TANI: begin
                         tanimoto_start_reg <= 1'b1;
-                        if (active_task == `MOL_DMA_TASK_PIPELINE) begin
-                            gnn_start_reg <= 1'b1;
-                            admet_start_reg <= 1'b1;
-                            input_run_bank_reg <= input_write_bank_reg;
-                            pipeline_done_mask <= 3'b000;
-                            state <= ST_PIPE_TANI;
-                        end else if (shared_mode)
+                        if (shared_mode)
                             state <= ST_WAIT_SHARED;
                         else
                             state <= ST_WAIT_TANI;
@@ -1404,7 +1436,7 @@ module dma_accelerator_lane_controller #(
                         end
                     end
 
-                    ST_PIPE_TANI: begin end
+                    ST_PIPE_WAIT: begin end
 
                     ST_DONE: if (done_valid && done_ready) begin
                         result_index <= 0;

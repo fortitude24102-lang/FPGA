@@ -109,7 +109,7 @@ module tb_dma_task_queue_frontend_tasks;
         input integer requested_result_words;
         input integer requested_item_count;
         input [7:0] expected_task_status;
-        input [8*24-1:0] name;
+        input [8*32-1:0] name;
         integer total_words;
         integer beat_count;
         integer remaining;

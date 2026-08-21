@@ -10,6 +10,7 @@ module tb_pipeline_parallel;
 
     reg task_valid = 1'b0;
     wire task_ready;
+    reg [7:0] task_id = PIPELINE_ID;
     reg [31:0] task_flags = 0;
     reg [31:0] task_item_count = 2;
     reg payload_valid = 1'b0;
@@ -18,6 +19,7 @@ module tb_pipeline_parallel;
     reg payload_last = 1'b0;
     reg done_ready = 1'b0;
     reg result_ready = 1'b0;
+    reg abort = 1'b0;
     wire done_valid, result_valid;
     wire [23:0] done_status;
     wire [31:0] done_result_words, done_detail, result_data;
@@ -35,7 +37,13 @@ module tb_pipeline_parallel;
     integer tani_countdown = 0;
     integer gnn_countdown = 0;
     integer admet_countdown = 0;
-    integer core_delay = 2400;
+    integer tani_delay = 2100;
+    integer gnn_delay = 2300;
+    integer admet_delay = 2500;
+    integer tani_done_cycle = -1;
+    integer gnn_done_cycle = -1;
+    integer admet_done_cycle = -1;
+    integer stranded_ready_cycles = 0;
     reg saw_tani_bank1_write = 0;
     reg saw_gnn_bank1_write = 0;
     reg saw_admet_bank1_write = 0;
@@ -51,7 +59,7 @@ module tb_pipeline_parallel;
     dma_accelerator_backend dut (
         .clk(clk), .rst_n(rst_n),
         .task_valid(task_valid), .task_ready(task_ready),
-        .task_id(PIPELINE_ID), .task_flags(task_flags),
+        .task_id(task_id), .task_flags(task_flags),
         .task_item_count(task_item_count), .task_sequence(6'd7),
         .payload_valid(payload_valid), .payload_ready(payload_ready),
         .payload_data(payload_data), .payload_last(payload_last),
@@ -59,7 +67,7 @@ module tb_pipeline_parallel;
         .done_status(done_status), .done_result_words(done_result_words),
         .done_detail(done_detail), .done_sequence(),
         .result_valid(result_valid), .result_ready(result_ready),
-        .result_data(result_data), .abort(1'b0),
+        .result_data(result_data), .abort(abort),
         .engine_busy(), .engine_start(engine_start), .engine_done(),
         .tanimoto_start(), .fingerprint_we(fingerprint_we),
         .fingerprint_db_select(), .fingerprint_addr(), .fingerprint_wdata(),
@@ -88,15 +96,31 @@ module tb_pipeline_parallel;
 
     always @(posedge clk) begin
         cycles <= cycles + 1;
-        if (|engine_start) begin
-            if (engine_start !== 3'b111)
+        if (!rst_n) begin
+            launch_count <= 0;
+            tani_countdown <= 0;
+            gnn_countdown <= 0;
+            admet_countdown <= 0;
+            tani_done_cycle <= -1;
+            gnn_done_cycle <= -1;
+            admet_done_cycle <= -1;
+            stranded_ready_cycles <= 0;
+            saw_tani_bank1_write <= 0;
+            saw_gnn_bank1_write <= 0;
+            saw_admet_bank1_write <= 0;
+        end else if (|engine_start) begin
+            if (task_id == PIPELINE_ID && engine_start !== 3'b111)
                 $fatal(1, "non-atomic Pipeline start %03b", engine_start);
+            if (task_id == PIPELINE_ID && launch_count == 0 &&
+                (!descriptor_we || admet_write_bank != admet_run_bank))
+                $fatal(1, "final registered write tag missing on launch we=%b bank=%b/%b",
+                       descriptor_we, admet_write_bank, admet_run_bank);
             tani_start_cycle[launch_count] <= cycles;
             gnn_start_cycle[launch_count] <= cycles;
             admet_start_cycle[launch_count] <= cycles;
-            tani_countdown <= core_delay;
-            gnn_countdown <= core_delay;
-            admet_countdown <= core_delay;
+            if (engine_start[0]) tani_countdown <= tani_delay;
+            if (engine_start[1]) gnn_countdown <= gnn_delay;
+            if (engine_start[2]) admet_countdown <= admet_delay;
             prediction_value <= launch_count == 0 ?
                 64'h0004_0003_0002_0001 : 64'h000e_000d_000c_000b;
             launch_count <= launch_count + 1;
@@ -105,6 +129,21 @@ module tb_pipeline_parallel;
             if (gnn_countdown != 0) gnn_countdown <= gnn_countdown - 1;
             if (admet_countdown != 0) admet_countdown <= admet_countdown - 1;
         end
+
+        if (tanimoto_valid) tani_done_cycle <= cycles;
+        if (gnn_valid) gnn_done_cycle <= cycles;
+        if (admet_valid) admet_done_cycle <= cycles;
+
+        if ((dut.exclusive_lane.state == 4'd1 ||
+             dut.exclusive_lane.state == 4'd4 ||
+             dut.exclusive_lane.state == 4'd6) &&
+            !dut.exclusive_lane.input_compute_running &&
+            dut.exclusive_lane.input_bank_ready != 0)
+            stranded_ready_cycles <= stranded_ready_cycles + 1;
+        else
+            stranded_ready_cycles <= 0;
+        if (stranded_ready_cycles > 1)
+            $fatal(1, "ready bank remained stranded without a running compute");
 
         if (tanimoto_busy && !engine_start[0] && fingerprint_we &&
             tani_write_bank == tani_run_bank)
@@ -133,6 +172,7 @@ module tb_pipeline_parallel;
             payload_last = 1'b0;
             done_ready = 1'b0;
             result_ready = 1'b0;
+            abort = 1'b0;
             repeat (4) @(posedge clk);
             rst_n = 1'b1;
             @(negedge clk);
@@ -169,8 +209,11 @@ module tb_pipeline_parallel;
         integer result_index;
         reg [31:0] expected;
         reset_backend();
+        task_id = PIPELINE_ID;
         task_flags = 0;
-        core_delay = 2400;
+        tani_delay = 2100;
+        gnn_delay = 2300;
+        admet_delay = 2500;
         start_task(2);
         for (word_index = 0; word_index < 3526; word_index = word_index + 1)
             send_word(word_index, 3526);
@@ -186,6 +229,11 @@ module tb_pipeline_parallel;
             $fatal(1, "inactive-bank writes missing tani/gnn/admet=%b/%b/%b",
                    saw_tani_bank1_write, saw_gnn_bank1_write,
                    saw_admet_bank1_write);
+        if (tani_done_cycle == gnn_done_cycle ||
+            tani_done_cycle == admet_done_cycle ||
+            gnn_done_cycle == admet_done_cycle)
+            $fatal(1, "core completions were not staggered %0d/%0d/%0d",
+                   tani_done_cycle, gnn_done_cycle, admet_done_cycle);
         @(negedge clk);
         done_ready = 1'b1;
         @(posedge clk);
@@ -209,6 +257,7 @@ module tb_pipeline_parallel;
         // FULL N>1 is shape-valid at the frontend but rejected here before
         // any numerical core starts; no giant multi-item result RAM exists.
         reset_backend();
+        task_id = PIPELINE_ID;
         task_flags = `MOL_DMA_FLAG_FULL_GNN_OUTPUT;
         start_task(2);
         for (word_index = 0; word_index < 3526; word_index = word_index + 1)
@@ -217,14 +266,97 @@ module tb_pipeline_parallel;
         payload_last = 1'b0;
         wait (done_valid);
         if (done_status != 24'd11 || done_detail != 32'h4655_4c4c ||
-            done_result_words != 0)
+            done_result_words != 0 || launch_count != 0)
             $fatal(1, "batched FULL status=%h detail=%h words=%0d",
                    done_status, done_detail, done_result_words);
 
+        // GNN FULL N>1 has the same deterministic service-layer rejection.
+        reset_backend();
+        task_id = `MOL_DMA_TASK_GNN;
+        task_flags = `MOL_DMA_FLAG_FULL_GNN_OUTPUT;
+        start_task(2);
+        for (word_index = 0; word_index < 3358; word_index = word_index + 1)
+            send_word(word_index, 3358);
+        payload_valid = 1'b0;
+        payload_last = 1'b0;
+        wait (done_valid);
+        if (done_status != 24'd11 || done_detail != 32'h4655_4c4c ||
+            done_result_words != 0 || launch_count != 0)
+            $fatal(1, "GNN batched FULL status=%h detail=%h words=%0d launches=%0d",
+                   done_status, done_detail, done_result_words, launch_count);
+
+        // Abort clears every ping-pong latch. Late core-valid pulses cannot
+        // recreate a completion or a result.
+        reset_backend();
+        task_id = PIPELINE_ID;
+        task_flags = 0;
+        tani_delay = 10000;
+        gnn_delay = 10000;
+        admet_delay = 10000;
+        start_task(1);
+        for (word_index = 0; word_index < 1763; word_index = word_index + 1)
+            send_word(word_index, 1763);
+        payload_valid = 1'b0;
+        payload_last = 1'b0;
+        wait (launch_count == 1);
+        @(negedge clk);
+        abort = 1'b1;
+        @(posedge clk);
+        @(negedge clk);
+        abort = 1'b0;
+        tani_countdown = 1;
+        gnn_countdown = 1;
+        admet_countdown = 1;
+        repeat (5) @(posedge clk);
+        if (done_valid || result_valid ||
+            dut.exclusive_lane.input_compute_running ||
+            dut.exclusive_lane.summary_capture_pending ||
+            dut.exclusive_lane.pipeline_done_mask != 0 ||
+            dut.exclusive_lane.input_bank_occupied != 0 ||
+            dut.exclusive_lane.input_bank_ready != 0 ||
+            dut.exclusive_lane.input_bank_loading ||
+            dut.exclusive_lane.item_payload_index != 0 ||
+            dut.exclusive_lane.loaded_items != 0 ||
+            dut.exclusive_lane.completed_items != 0 ||
+            dut.exclusive_lane.result_valid_reg)
+            $fatal(1, "abort left ping-pong work live");
+
+        // Complete item 0, then accept item 1's final word on the exact cycle
+        // its summary capture retires. Item 1 must dispatch on a later cycle.
+        reset_backend();
+        task_id = PIPELINE_ID;
+        task_flags = 0;
+        tani_delay = 10000;
+        gnn_delay = 10000;
+        admet_delay = 10000;
+        start_task(2);
+        for (word_index = 0; word_index < 3525; word_index = word_index + 1)
+            send_word(word_index, 3526);
+        tani_countdown = 1;
+        gnn_countdown = 1;
+        admet_countdown = 1;
+        wait (dut.exclusive_lane.summary_capture_pending);
+        wait (dut.exclusive_lane.summary_capture_wait == 0);
+        send_word(3525, 3526);
+        payload_valid = 1'b0;
+        payload_last = 1'b0;
+        begin : race_dispatch_wait
+            repeat (8) begin
+                @(posedge clk);
+                if (launch_count == 2)
+                    disable race_dispatch_wait;
+            end
+        end
+        if (launch_count != 2)
+            $fatal(1, "ready bank was stranded by final-word/capture race");
+
         // A third item cannot overwrite either of two occupied banks.
         reset_backend();
+        task_id = PIPELINE_ID;
         task_flags = 0;
-        core_delay = 10000;
+        tani_delay = 10000;
+        gnn_delay = 10000;
+        admet_delay = 10000;
         start_task(3);
         for (word_index = 0; word_index < 3526; word_index = word_index + 1)
             send_word(word_index, 5289);
@@ -242,7 +374,7 @@ module tb_pipeline_parallel;
     end
 
     initial begin
-        repeat (30000) @(posedge clk);
+        repeat (100000) @(posedge clk);
         $fatal(1, "timeout launches=%0d state=%0d loaded=%0d completed=%0d",
                launch_count, dut.exclusive_lane.state,
                dut.exclusive_lane.loaded_items,

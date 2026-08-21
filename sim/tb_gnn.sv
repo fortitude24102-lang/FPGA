@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 
 module tb_gnn;
-    localparam int MAX_NODES   = 3;
+    localparam int MAX_NODES   = 9;
     localparam int FEATURE_DIM = 2;
     localparam int HIDDEN_DIM  = 2;
     localparam int DATA_WIDTH  = 16;
@@ -9,21 +9,24 @@ module tb_gnn;
     logic clk = 1'b0;
     logic rst_n = 1'b0;
     logic start = 1'b0;
+    logic input_write_bank = 1'b0;
+    logic input_run_bank = 1'b0;
     logic feature_we = 1'b0;
-    logic [1:0] feature_word_addr = '0;
+    logic [3:0] feature_word_addr = '0;
     logic [31:0] feature_wdata = '0;
     logic [3:0] feature_wstrb = '0;
     logic adjacency_we = 1'b0;
+    logic [1:0] adjacency_word_addr = '0;
     logic [31:0] adjacency_wdata = '0;
     logic output_re = 1'b0;
-    logic [1:0] output_word_addr = '0;
+    logic [3:0] output_word_addr = '0;
     wire [31:0] output_rdata;
     logic weight_we = 1'b0;
     logic [$clog2(FEATURE_DIM*HIDDEN_DIM)-1:0] weight_addr = '0;
     logic [DATA_WIDTH-1:0] weight_wdata = '0;
     wire busy;
     wire valid;
-    logic [31:0] output_words [0:2];
+    logic [31:0] output_words [0:8];
 
     int errors = 0;
     int checks = 0;
@@ -40,8 +43,8 @@ module tb_gnn;
         .clk(clk),
         .rst_n(rst_n),
         .start(start),
-        .input_write_bank(1'b0),
-        .input_run_bank(1'b0),
+        .input_write_bank(input_write_bank),
+        .input_run_bank(input_run_bank),
         .node_features_in(
             {MAX_NODES*FEATURE_DIM*DATA_WIDTH{1'b0}}),
         .adjacency_in({MAX_NODES*MAX_NODES{1'b0}}),
@@ -50,7 +53,7 @@ module tb_gnn;
         .feature_wdata(feature_wdata),
         .feature_wstrb(feature_wstrb),
         .adjacency_we(adjacency_we),
-        .adjacency_word_addr(1'd0),
+        .adjacency_word_addr(adjacency_word_addr),
         .adjacency_wdata(adjacency_wdata),
         .adjacency_wstrb(4'hf),
         .output_re(output_re),
@@ -88,9 +91,13 @@ module tb_gnn;
         end
     endtask
 
-    task automatic write_adjacency(input logic [31:0] value);
+    task automatic write_adjacency(
+        input int word_index,
+        input logic [31:0] value
+    );
         begin
             @(negedge clk);
+            adjacency_word_addr = word_index;
             adjacency_wdata = value;
             adjacency_we = 1'b1;
             @(negedge clk);
@@ -173,6 +180,8 @@ module tb_gnn;
         //   node 0 = [ 1, 2]
         //   node 1 = [ 3, 4]
         //   node 2 = [-1, 1]
+        for (elapsed = 0; elapsed < MAX_NODES; elapsed++)
+            write_feature_word(elapsed, 0.0, 0.0);
         write_feature_word(0,  1.0, 2.0);
         write_feature_word(1,  3.0, 4.0);
         write_feature_word(2, -1.0, 1.0);
@@ -180,7 +189,9 @@ module tb_gnn;
         // Destination 0 aggregates nodes 0 and 1.
         // Destination 1 aggregates node 2.
         // Destination 2 has no neighbors.
-        write_adjacency(32'h0000_0023);
+        write_adjacency(0, 32'h0000_0803);
+        write_adjacency(1, 32'd0);
+        write_adjacency(2, 32'd0);
 
         @(negedge clk);
         start = 1'b1;
@@ -210,6 +221,34 @@ module tb_gnn;
         check_output(1, 1,  1.5);
         check_output(2, 0,  0.0);
         check_output(2, 1,  0.0);
+
+        // Bank 1 uses the highest logical feature and adjacency word
+        // addresses. Concatenating a bank bit maps these past DEPTH*2 when
+        // the per-bank depths (9 and 3) are not powers of two.
+        input_write_bank = 1'b1;
+        for (elapsed = 0; elapsed < MAX_NODES; elapsed++)
+            write_feature_word(elapsed, 0.0, 0.0);
+        write_feature_word(8, 5.0, 7.0);
+        write_adjacency(0, 32'd0);
+        write_adjacency(1, 32'd0);
+        write_adjacency(2, 32'h0001_0000);
+        input_run_bank = 1'b1;
+
+        @(negedge clk);
+        start = 1'b1;
+        @(negedge clk);
+        start = 1'b0;
+        elapsed = 0;
+        while (!valid && elapsed < 1000) begin
+            @(posedge clk);
+            #1;
+            elapsed++;
+        end
+        if (!valid)
+            $fatal(1, "GNN bank-1 timeout");
+        read_output_word(8);
+        check_output(8, 0, 0.0);
+        check_output(8, 1, 16.5);
 
         $display("GNN summary: %0d checks, %0d errors", checks, errors);
         if (errors != 0)

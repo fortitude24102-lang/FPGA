@@ -146,6 +146,9 @@ module gnn_message_passing #(
         (MAC_FEATURE_GROUPS <= 1) ? 1 : $clog2(MAC_FEATURE_GROUPS);
     localparam integer FEATURE_BANK_ADDR_W =
         (FEATURE_BANK_DEPTH <= 1) ? 1 : $clog2(FEATURE_BANK_DEPTH);
+    localparam integer FEATURE_MEMORY_DEPTH = FEATURE_BANK_DEPTH * 2;
+    localparam integer FEATURE_MEMORY_ADDR_W =
+        (FEATURE_MEMORY_DEPTH <= 1) ? 1 : $clog2(FEATURE_MEMORY_DEPTH);
     localparam integer WEIGHT_BANK_ADDR_W =
         (WEIGHT_BANK_DEPTH <= 1) ? 1 : $clog2(WEIGHT_BANK_DEPTH);
     localparam integer OUTPUT_BANK_ADDR_W =
@@ -158,6 +161,10 @@ module gnn_message_passing #(
             ? 1 : $clog2(MAX_NODES*MAX_NODES);
     localparam integer ADJACENCY_WORD_ADDR_W =
         (ADJACENCY_WORDS <= 1) ? 1 : $clog2(ADJACENCY_WORDS);
+    localparam integer ADJACENCY_MEMORY_DEPTH = ADJACENCY_WORDS * 2;
+    localparam integer ADJACENCY_MEMORY_ADDR_W =
+        (ADJACENCY_MEMORY_DEPTH <= 1) ? 1 :
+        $clog2(ADJACENCY_MEMORY_DEPTH);
     localparam integer OUTPUT_BANK_IDX_W =
         (OUTPUT_BANKS <= 1) ? 1 : $clog2(OUTPUT_BANKS);
     localparam integer AGG_WIDTH = DATA_WIDTH +
@@ -202,10 +209,11 @@ module gnn_message_passing #(
 
     reg [NODE_IDX_W-1:0] aggregate_neighbor_issue;
     reg [AGG_GROUP_W-1:0] aggregate_group_issue;
-    wire [FEATURE_BANK_ADDR_W:0] feature_read_addr = {
-        active_input_bank,
-        aggregate_neighbor_issue*AGG_GROUPS + aggregate_group_issue
-    };
+    wire [FEATURE_BANK_ADDR_W-1:0] feature_read_logical_addr =
+        aggregate_neighbor_issue*AGG_GROUPS + aggregate_group_issue;
+    wire [FEATURE_MEMORY_ADDR_W-1:0] feature_read_addr =
+        feature_read_logical_addr +
+        (active_input_bank ? FEATURE_BANK_DEPTH : 0);
     wire [AGG_LANES*DATA_WIDTH-1:0] feature_bank_rdata_bus;
 
     genvar feature_bank;
@@ -220,18 +228,19 @@ module gnn_message_passing #(
             wire bank_we = feature_we &&
                 (state == ST_IDLE || input_write_bank != active_input_bank) &&
                 (select_low || select_high);
-            wire [FEATURE_BANK_ADDR_W:0] bank_waddr = {
-                input_write_bank,
-                select_low ? feature_write_addr0 : feature_write_addr1
-            };
+            wire [FEATURE_BANK_ADDR_W-1:0] bank_logical_waddr =
+                select_low ? feature_write_addr0 : feature_write_addr1;
+            wire [FEATURE_MEMORY_ADDR_W-1:0] bank_waddr =
+                bank_logical_waddr +
+                (input_write_bank ? FEATURE_BANK_DEPTH : 0);
             wire [DATA_WIDTH-1:0] bank_wdata =
                 select_low ? feature_wdata[15:0] : feature_wdata[31:16];
             wire [1:0] bank_wstrb =
                 select_low ? feature_wstrb[1:0] : feature_wstrb[3:2];
             gnn_dist_bank #(
                 .WIDTH(DATA_WIDTH),
-                .DEPTH(FEATURE_BANK_DEPTH*2),
-                .ADDR_WIDTH(FEATURE_BANK_ADDR_W+1)
+                .DEPTH(FEATURE_MEMORY_DEPTH),
+                .ADDR_WIDTH(FEATURE_MEMORY_ADDR_W)
             ) bank (
                 .clk(clk),
                 .we(bank_we),
@@ -245,9 +254,12 @@ module gnn_message_passing #(
         end
     endgenerate
 
-    (* ram_style = "distributed" *)
     reg active_input_bank;
-    reg [31:0] adjacency_memory [0:2*ADJACENCY_WORDS-1];
+    (* ram_style = "distributed" *)
+    reg [31:0] adjacency_memory [0:ADJACENCY_MEMORY_DEPTH-1];
+    wire [ADJACENCY_MEMORY_ADDR_W-1:0] adjacency_write_addr =
+        adjacency_word_addr +
+        (input_write_bank ? ADJACENCY_WORDS : 0);
     integer adjacency_byte_lane;
     always @(posedge clk) begin
         if (adjacency_we &&
@@ -255,7 +267,7 @@ module gnn_message_passing #(
             for (adjacency_byte_lane = 0; adjacency_byte_lane < 4;
                  adjacency_byte_lane = adjacency_byte_lane + 1)
                 if (adjacency_wstrb[adjacency_byte_lane])
-                    adjacency_memory[{input_write_bank, adjacency_word_addr}]
+                    adjacency_memory[adjacency_write_addr]
                         [adjacency_byte_lane*8 +: 8] <=
                             adjacency_wdata[adjacency_byte_lane*8 +: 8];
     end
@@ -315,8 +327,11 @@ module gnn_message_passing #(
         node_idx*MAX_NODES + aggregate_neighbor_issue;
     wire [ADJACENCY_WORD_ADDR_W-1:0] aggregate_adjacency_word =
         aggregate_adjacency_element / 32;
+    wire [ADJACENCY_MEMORY_ADDR_W-1:0] aggregate_adjacency_addr =
+        aggregate_adjacency_word +
+        (active_input_bank ? ADJACENCY_WORDS : 0);
     wire aggregate_issue_adjacency =
-        adjacency_memory[{active_input_bank, aggregate_adjacency_word}]
+        adjacency_memory[aggregate_adjacency_addr]
             [aggregate_adjacency_element % 32];
 
     reg mac_all_issued;

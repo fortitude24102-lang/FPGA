@@ -24,12 +24,16 @@ module tb_top_dma_tasks;
     logic [31:0] expected_result_words [0:MAX_TASKS-1];
     logic [31:0] expected_items [0:MAX_TASKS-1];
     logic [31:0] expected_tag [0:MAX_TASKS-1];
+    logic [23:0] expected_status [0:MAX_TASKS-1];
+    logic [31:0] expected_detail [0:MAX_TASKS-1];
     integer request_count;
     integer response_count;
     integer expected_count;
     integer expected_tasks;
     integer batch_sequence;
     integer lane;
+    integer engine_launch_count;
+    wire [2:0] engine_start;
 
     always #5 clk = ~clk;
 
@@ -50,7 +54,8 @@ module tb_top_dma_tasks;
         .s_axis_job_tlast(s_last),
         .m_axis_result_tdata(m_data), .m_axis_result_tkeep(m_keep),
         .m_axis_result_tvalid(m_valid), .m_axis_result_tready(m_ready),
-        .m_axis_result_tlast(m_last)
+        .m_axis_result_tlast(m_last),
+        .engine_start(engine_start)
     );
 
     task automatic begin_batch(input integer task_count);
@@ -103,7 +108,25 @@ module tb_top_dma_tasks;
             expected_result_words[expected_count] = result_words;
             expected_items[expected_count] = items;
             expected_tag[expected_count] = tag;
+            expected_status[expected_count] = 24'd0;
+            expected_detail[expected_count] = 32'd0;
             expected_count = expected_count + 1;
+        end
+    endtask
+
+    task automatic add_unsupported_full_task(
+        input [31:0] job,
+        input [7:0] id,
+        input integer payload_words,
+        input integer result_capacity,
+        input [31:0] tag
+    );
+        begin
+            add_task(job, id, 32'h100, payload_words,
+                     result_capacity, 2, tag);
+            expected_result_words[expected_count-1] = 0;
+            expected_status[expected_count-1] = 24'd11;
+            expected_detail[expected_count-1] = 32'h4655_4c4c;
         end
     endtask
 
@@ -135,15 +158,25 @@ module tb_top_dma_tasks;
         end
     endtask
 
-    task automatic check_response(input [255:0] label);
+    task automatic check_response(input [8*40-1:0] label);
         integer cursor;
         integer t;
         integer p;
         integer wanted_words;
+        integer expected_errors;
+        reg [31:0] expected_first_error_job;
         begin
             wanted_words = 16;
+            expected_errors = 0;
+            expected_first_error_job = 32'hffff_ffff;
             for (t = 0; t < expected_tasks; t = t + 1)
                 wanted_words = wanted_words + 8 + expected_result_words[t];
+            for (t = 0; t < expected_tasks; t = t + 1)
+                if (expected_status[t] != 0) begin
+                    if (expected_errors == 0)
+                        expected_first_error_job = expected_job[t];
+                    expected_errors = expected_errors + 1;
+                end
             repeat (3000000) begin
                 @(posedge clk);
                 if (response_count == wanted_words) begin
@@ -154,10 +187,12 @@ module tb_top_dma_tasks;
                     cursor = 8;
                     for (t = 0; t < expected_tasks; t = t + 1) begin
                         if (response[cursor+0] !== expected_job[t] ||
-                            response[cursor+1] !== {24'd0, expected_task[t]} ||
+                            response[cursor+1] !==
+                                {expected_status[t], expected_task[t]} ||
                             response[cursor+2] !== expected_result_words[t] ||
                             response[cursor+5] !== expected_items[t] ||
-                            response[cursor+6] !== expected_tag[t])
+                            response[cursor+6] !== expected_tag[t] ||
+                            response[cursor+7] !== expected_detail[t])
                             $fatal(1, "%0s record %0d header mismatch at %0d",
                                    label, t, cursor);
                         if (expected_task[t] == 0)
@@ -174,8 +209,11 @@ module tb_top_dma_tasks;
                     if (response[cursor] !== 32'h4d4f4c45 ||
                         response[cursor+1] !== request[2] ||
                         response[cursor+2] !== expected_tasks ||
-                        response[cursor+3] !== 0 ||
-                        response[cursor+4] !== wanted_words)
+                        response[cursor+3] !== expected_errors ||
+                        response[cursor+4] !== wanted_words ||
+                        response[cursor+5] !== 0 ||
+                        response[cursor+6] !== expected_first_error_job ||
+                        response[cursor+7] !== 0)
                         $fatal(1, "%0s trailer mismatch at %0d", label, cursor);
                     $display("PASS %0s (%0d tasks, %0d result words)",
                              label, expected_tasks, wanted_words);
@@ -188,6 +226,10 @@ module tb_top_dma_tasks;
     endtask
 
     always @(posedge clk) begin
+        if (!rst_n)
+            engine_launch_count <= 0;
+        else if (|engine_start)
+            engine_launch_count <= engine_launch_count + 1;
         if (rst_n && m_valid && m_ready) begin
             for (lane = 0; lane < 4; lane = lane + 1)
                 if (m_keep[lane*4 +: 4] == 4'hf) begin
@@ -198,6 +240,7 @@ module tb_top_dma_tasks;
     end
 
     initial begin
+        integer launches_before;
         batch_sequence = 0;
         repeat (5) @(posedge clk);
         rst_n = 1;
@@ -229,6 +272,16 @@ module tb_top_dma_tasks;
         add_task(12, 3, 0, 1763, 4, 1, 32'ha00c);
         send_batch();
         check_response("mixed 0/1/2/3 batch");
+
+        launches_before = engine_launch_count;
+        begin_batch(2);
+        add_unsupported_full_task(13, 1, 3358, 6400, 32'ha00d);
+        add_unsupported_full_task(14, 3, 3526, 6410, 32'ha00e);
+        send_batch();
+        check_response("batched FULL explicit unsupported");
+        if (engine_launch_count != launches_before)
+            $fatal(1, "unsupported FULL tasks launched a core: %0d -> %0d",
+                   launches_before, engine_launch_count);
 
         $display("ALL TOP DMA TASK TESTS PASSED");
         $finish;
