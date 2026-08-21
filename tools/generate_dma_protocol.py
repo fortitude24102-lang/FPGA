@@ -62,8 +62,32 @@ def protocol_constants(spec: Mapping[str, object]) -> list[tuple[str, int, bool]
             macro = aliases.get(name, f"{prefix}{upper(name)}")
             constants.append((macro, parse_integer(value), False))
 
+    weight_reload = spec["weight_reload"]
     offsets = spec["field_offsets"]
-    assert isinstance(offsets, Mapping)
+    assert isinstance(weight_reload, Mapping) and isinstance(offsets, Mapping)
+    task_offsets = offsets["task"]
+    result_offsets = offsets["result"]
+    assert isinstance(task_offsets, Mapping) and isinstance(result_offsets, Mapping)
+    constants.extend(
+        (
+            (
+                "WEIGHT_RELOAD_EXPECTED_CRC_WORD",
+                parse_integer(task_offsets[weight_reload["expected_crc_field"]]),
+                False,
+            ),
+            (
+                "WEIGHT_RELOAD_OBSERVED_CRC_WORD",
+                parse_integer(result_offsets[weight_reload["observed_crc_field"]]),
+                False,
+            ),
+            (
+                "WEIGHT_RELOAD_RESULT_EPOCH_WORDS",
+                parse_integer(weight_reload["result_epoch_words"]),
+                False,
+            ),
+        )
+    )
+
     for header_name, fields in offsets.items():
         assert isinstance(fields, Mapping)
         for field_name, value in fields.items():
@@ -91,6 +115,15 @@ def validate_spec(spec: Mapping[str, object], constants: list[tuple[str, int, bo
         raise ValueError("task IDs must be 0..3 plus weight reload 0xFE")
     if sorted(parse_integer(value) for value in statuses.values()) != list(range(12)):
         raise ValueError("status codes must be the contiguous range 0..11")
+
+    weight_reload = spec["weight_reload"]
+    assert isinstance(weight_reload, Mapping)
+    if weight_reload.get("expected_crc_field") != "user_tag":
+        raise ValueError("weight reload expected CRC must use task user_tag")
+    if weight_reload.get("observed_crc_field") != "detail":
+        raise ValueError("weight reload observed CRC must use result detail")
+    if parse_integer(weight_reload.get("result_epoch_words")) != 1:
+        raise ValueError("weight reload result must contain one epoch word")
 
 
 def verilog_literal(value: int, hexadecimal: bool) -> str:

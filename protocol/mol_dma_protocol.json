@@ -17,7 +17,7 @@
     "max_tasks": 64,
     "max_transfer_bytes": 2097152,
     "max_transfer_words": 524288,
-    "max_item_count": 64
+    "max_item_count": 128
   },
   "batch_flags": {
     "continue_on_task_error": 1
@@ -59,6 +59,11 @@
     "gnn_full_result": 3200,
     "admet_results_per_item": 4,
     "weight_reload": 4538
+  },
+  "weight_reload": {
+    "expected_crc_field": "user_tag",
+    "observed_crc_field": "detail",
+    "result_epoch_words": 1
   },
   "field_offsets": {
     "batch": {

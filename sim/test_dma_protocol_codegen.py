@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -120,6 +121,33 @@ class ProtocolCodegenTests(unittest.TestCase):
             self.assertIn("mol_dma_result_header_t", c_header)
             self.assertIn("mol_dma_trailer_t", c_header)
             self.assertEqual(c_header.count("sizeof("), 4)
+
+    def test_v2_batch_limits_and_weight_reload_contract(self) -> None:
+        """Catches stale v1 batch limits or missing reload CRC/epoch semantics."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            verilog_out = temporary / "mol_dma_protocol.vh"
+            c_out = temporary / "mol_dma_protocol.h"
+
+            completed = self.run_generator(verilog_out, c_out)
+
+            self.assertEqual(completed.returncode, 0, completed.stdout)
+            rtl = verilog_out.read_text(encoding="utf-8")
+            c_header = c_out.read_text(encoding="utf-8")
+            spec = json.loads(SPEC.read_text(encoding="utf-8"))
+            self.assertIn("`define MOL_DMA_MAX_ITEM_COUNT 128", rtl)
+            self.assertIn("#define MOL_DMA_MAX_ITEM_COUNT UINT32_C(128)", c_header)
+            self.assertIn("`define MOL_DMA_MAX_TASKS 64", rtl)
+            self.assertIn("#define MOL_DMA_MAX_TASKS UINT32_C(64)", c_header)
+            self.assertIn("`define MOL_DMA_WEIGHT_RELOAD_EXPECTED_CRC_WORD 5", rtl)
+            self.assertIn("`define MOL_DMA_WEIGHT_RELOAD_OBSERVED_CRC_WORD 7", rtl)
+            self.assertIn("`define MOL_DMA_WEIGHT_RELOAD_RESULT_EPOCH_WORDS 1", rtl)
+            self.assertIn("#define MOL_DMA_WEIGHT_RELOAD_EXPECTED_CRC_WORD UINT32_C(5)", c_header)
+            self.assertIn("#define MOL_DMA_WEIGHT_RELOAD_OBSERVED_CRC_WORD UINT32_C(7)", c_header)
+            self.assertIn("#define MOL_DMA_WEIGHT_RELOAD_RESULT_EPOCH_WORDS UINT32_C(1)", c_header)
+            self.assertEqual(spec["weight_reload"]["expected_crc_field"], "user_tag")
+            self.assertEqual(spec["weight_reload"]["observed_crc_field"], "detail")
+            self.assertEqual(spec["weight_reload"]["result_epoch_words"], 1)
 
     def test_check_mode_rejects_generated_file_drift(self) -> None:
         """Catches hand edits or stale generated protocol headers."""
