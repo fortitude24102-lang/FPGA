@@ -17,6 +17,10 @@ PROTOCOL_TEST = SIM / "test_dma_protocol_codegen.py"
 PROTOCOL_GENERATOR = ROOT / "tools" / "generate_dma_protocol.py"
 
 TESTS = {
+    "task_scoreboard": (
+        "tb_dma_task_scoreboard",
+        [RTL / "dma_task_queue.v", SIM / "tb_dma_task_scoreboard.sv"],
+    ),
     "dma_queue": (
         "tb_dma_task_queue",
         [RTL / "dma_task_queue.v", SIM / "tb_dma_task_queue.sv"],

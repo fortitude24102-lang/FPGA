@@ -62,6 +62,7 @@ module tb_dma_task_queue;
     wire [7:0] backend_task_id;
     wire [31:0] backend_task_flags, backend_task_item_count;
     wire [31:0] backend_task_timeout_cycles;
+    wire [5:0] backend_task_sequence;
     wire backend_payload_valid;
     reg backend_payload_ready = 0;
     wire [31:0] backend_payload_data;
@@ -71,6 +72,7 @@ module tb_dma_task_queue;
     reg [23:0] backend_done_status = 0;
     reg [31:0] backend_done_result_words = 0;
     reg [31:0] backend_done_detail = 0;
+    reg [5:0] backend_done_sequence = 0;
     reg backend_result_valid = 0;
     wire backend_result_ready;
     reg [31:0] backend_result_data = 0;
@@ -129,6 +131,7 @@ module tb_dma_task_queue;
         .backend_task_id(backend_task_id), .backend_task_flags(backend_task_flags),
         .backend_task_item_count(backend_task_item_count),
         .backend_task_timeout_cycles(backend_task_timeout_cycles),
+        .backend_task_sequence(backend_task_sequence),
         .backend_payload_valid(backend_payload_valid),
         .backend_payload_ready(backend_payload_ready),
         .backend_payload_data(backend_payload_data),
@@ -138,6 +141,7 @@ module tb_dma_task_queue;
         .backend_done_status(backend_done_status),
         .backend_done_result_words(backend_done_result_words),
         .backend_done_detail(backend_done_detail),
+        .backend_done_sequence(backend_done_sequence),
         .backend_result_valid(backend_result_valid),
         .backend_result_ready(backend_result_ready),
         .backend_result_data(backend_result_data),
@@ -177,8 +181,10 @@ module tb_dma_task_queue;
             backend_payload_ready <= (cycle_count[2:0] != 3'd3);
             if (legacy_reject) legacy_reject_events <= legacy_reject_events + 1;
             if (backend_abort) backend_abort_events <= backend_abort_events + 1;
-            if (backend_task_valid && backend_task_ready)
+            if (backend_task_valid && backend_task_ready) begin
                 backend_task_events <= backend_task_events + 1;
+                backend_done_sequence <= backend_task_sequence;
+            end
             if (fmt_batch_valid && fmt_batch_ready) begin
                 if (phase == 0) begin
                     if (fmt_batch_id != 32'hBA7C0004 ||
@@ -313,6 +319,7 @@ module tb_dma_task_queue;
     task automatic send_rejected_result_batch;
         integer discard_index;
         begin
+            @(negedge clk);
             in_batch_id = 32'hBA7C0F01;
             in_batch_task_count = 1;
             in_batch_flags = 0;
@@ -361,6 +368,8 @@ module tb_dma_task_queue;
                 @(negedge clk);
                 backend_result_valid = 0;
             end
+            while (!fmt_result_valid) @(negedge clk);
+            @(negedge clk);
             fmt_result_reject = 0;
             while (!in_task_ready) @(negedge clk);
             in_end_status = 0;
@@ -374,6 +383,7 @@ module tb_dma_task_queue;
 
     task automatic send_frontend_error_batch;
         begin
+            @(negedge clk);
             in_batch_id = 32'hBA7C0E01;
             in_batch_task_count = 1;
             in_batch_flags = 0;
@@ -451,6 +461,7 @@ module tb_dma_task_queue;
     task automatic send_stress_batch;
         integer stress_index;
         begin
+            @(negedge clk);
             in_batch_id = 32'hBA7C0040;
             in_batch_task_count = 64;
             in_batch_flags = 0;
@@ -474,6 +485,7 @@ module tb_dma_task_queue;
 
     task automatic send_timeout_batch;
         begin
+            @(negedge clk);
             in_batch_id = 32'hBA7C0001;
             in_batch_task_count = 1;
             in_batch_flags = 0;

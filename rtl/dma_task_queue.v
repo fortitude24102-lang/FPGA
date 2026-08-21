@@ -77,6 +77,7 @@ module dma_task_queue #(
     output wire [31:0]  backend_task_flags,
     output wire [31:0]  backend_task_item_count,
     output wire [31:0]  backend_task_timeout_cycles,
+    output wire [5:0]   backend_task_sequence,
 
     output wire         backend_payload_valid,
     input  wire         backend_payload_ready,
@@ -88,6 +89,7 @@ module dma_task_queue #(
     input  wire [23:0]  backend_done_status,
     input  wire [31:0]  backend_done_result_words,
     input  wire [31:0]  backend_done_detail,
+    input  wire [5:0]   backend_done_sequence,
 
     input  wire         backend_result_valid,
     output wire         backend_result_ready,
@@ -100,31 +102,27 @@ module dma_task_queue #(
     output reg          dma_active
 );
 
-    localparam [3:0] STATE_IDLE            = 4'd0;
-    localparam [3:0] STATE_WAIT_TASK       = 4'd1;
-    localparam [3:0] STATE_SEND_BACKEND    = 4'd2;
-    localparam [3:0] STATE_FORWARD_PAYLOAD = 4'd3;
-    localparam [3:0] STATE_WAIT_BACKEND    = 4'd4;
-    localparam [3:0] STATE_SUBMIT_RESULT   = 4'd5;
-    localparam [3:0] STATE_FORWARD_RESULT  = 4'd6;
-    localparam [3:0] STATE_DISCARD_RESULT  = 4'd7;
-    localparam [3:0] STATE_COMPLETE_TASK   = 4'd8;
-    localparam [3:0] STATE_FINISH          = 4'd9;
-    localparam [3:0] STATE_WAIT_FORMATTER  = 4'd10;
+    localparam [1:0] BATCH_IDLE           = 2'd0;
+    localparam [1:0] BATCH_ACTIVE         = 2'd1;
+    localparam [1:0] BATCH_FINISH         = 2'd2;
+    localparam [1:0] BATCH_WAIT_FORMATTER = 2'd3;
+    localparam [1:0] INGRESS_IDLE         = 2'd0;
+    localparam [1:0] INGRESS_DISPATCH     = 2'd1;
+    localparam [1:0] INGRESS_PAYLOAD      = 2'd2;
+    localparam [1:0] RETIRE_HEADER        = 2'd0;
+    localparam [1:0] RETIRE_BUFFER        = 2'd1;
+    localparam [1:0] RETIRE_DIRECT        = 2'd2;
+    localparam integer RESULT_POOL_SLOTS = 4;
+    localparam integer RESULT_POOL_WORDS = 256;
 
-    reg [3:0] state;
-    reg [31:0] active_job_id;
-    reg [7:0] active_task_id;
-    reg [31:0] active_task_flags;
-    reg [31:0] active_item_count;
-    reg [31:0] active_user_tag;
-    reg [31:0] active_timeout_cycles;
-    reg [23:0] active_result_status;
-    reg [31:0] active_result_words;
-    reg [31:0] active_result_detail;
-    reg [63:0] active_compute_cycles;
-    reg [31:0] result_word_index;
-
+    reg [1:0] batch_state;
+    reg [1:0] ingress_state;
+    reg [1:0] retire_state;
+    reg [5:0] allocate_ptr;
+    reg [5:0] retire_ptr;
+    reg [6:0] occupancy;
+    reg [5:0] ingress_sequence;
+    reg ingress_large_full;
     reg end_pending;
     reg [7:0] stored_end_status;
     reg [31:0] stored_end_detail;
@@ -132,226 +130,459 @@ module dma_task_queue #(
     reg [31:0] error_count;
     reg [31:0] first_error_job_id;
 
-    wire [31:0] selected_timeout =
-        (active_timeout_cycles == 0) ? DEFAULT_TIMEOUT_CYCLES :
-                                       active_timeout_cycles;
+    reg entry_valid [0:63];
+    reg entry_dispatched [0:63];
+    reg entry_running [0:63];
+    reg entry_complete [0:63];
+    reg entry_has_buffer [0:63];
+    reg entry_direct [0:63];
+    reg [5:0] entry_sequence [0:63];
+    reg [31:0] entry_job_id [0:63];
+    reg [7:0] entry_task_id [0:63];
+    reg [31:0] entry_flags [0:63];
+    reg [31:0] entry_item_count [0:63];
+    reg [31:0] entry_user_tag [0:63];
+    reg [31:0] entry_timeout_cycles [0:63];
+    reg [23:0] entry_result_status [0:63];
+    reg [31:0] entry_result_words [0:63];
+    reg [31:0] entry_result_detail [0:63];
+    reg [63:0] entry_compute_cycles [0:63];
+    reg [1:0] entry_pool_select [0:63];
 
-    assign fmt_batch_valid = (state == STATE_IDLE) && in_batch_valid &&
+    reg [RESULT_POOL_SLOTS-1:0] pool_valid;
+    reg [31:0] result_pool [0:RESULT_POOL_SLOTS*RESULT_POOL_WORDS-1];
+    reg free_pool_available;
+    reg [1:0] free_pool_select;
+    reg capture_active;
+    reg [5:0] capture_sequence;
+    reg [1:0] capture_pool_select;
+    reg [8:0] capture_word_index;
+    reg [31:0] capture_word_count;
+    reg [31:0] retire_word_index;
+    reg retire_reject;
+
+    integer state_index;
+    integer assertion_index;
+    integer pool_scan;
+
+    always @* begin
+        free_pool_available = 1'b0;
+        free_pool_select = 2'd0;
+        for (pool_scan = 0; pool_scan < RESULT_POOL_SLOTS;
+             pool_scan = pool_scan + 1) begin
+            if (!pool_valid[pool_scan] && !free_pool_available) begin
+                free_pool_available = 1'b1;
+                free_pool_select = pool_scan[1:0];
+            end
+        end
+    end
+
+    wire queue_full = (occupancy == 7'd64);
+    wire queue_empty = (occupancy == 7'd0);
+    wire batch_accept = in_batch_valid && in_batch_ready;
+    wire allocate_fire = in_task_valid && in_task_ready;
+    wire end_fire = in_end_valid && in_end_ready;
+
+    assign fmt_batch_valid = (batch_state == BATCH_IDLE) && in_batch_valid &&
                              !legacy_active;
-    assign in_batch_ready = (state == STATE_IDLE) && !legacy_active &&
+    assign in_batch_ready = (batch_state == BATCH_IDLE) && !legacy_active &&
                             fmt_batch_ready;
     assign fmt_batch_id = in_batch_id;
     assign fmt_expected_task_count = in_batch_task_count;
     assign fmt_header_status = in_batch_status;
     assign fmt_output_capacity_words = in_batch_max_result_words;
 
-    assign in_task_ready = (state == STATE_WAIT_TASK) && !end_pending;
-    assign backend_task_valid = (state == STATE_SEND_BACKEND);
-    assign backend_task_id = active_task_id;
-    assign backend_task_flags = active_task_flags;
-    assign backend_task_item_count = active_item_count;
-    assign backend_task_timeout_cycles = selected_timeout;
+    assign in_task_ready = (batch_state == BATCH_ACTIVE) && !end_pending &&
+                           (ingress_state == INGRESS_IDLE) && !queue_full;
+    assign backend_task_valid = (ingress_state == INGRESS_DISPATCH) &&
+                                (!ingress_large_full ||
+                                 (ingress_sequence == retire_ptr));
+    assign backend_task_id = entry_task_id[ingress_sequence];
+    assign backend_task_flags = entry_flags[ingress_sequence];
+    assign backend_task_item_count = entry_item_count[ingress_sequence];
+    assign backend_task_timeout_cycles =
+        (entry_timeout_cycles[ingress_sequence] == 0) ?
+        DEFAULT_TIMEOUT_CYCLES : entry_timeout_cycles[ingress_sequence];
+    assign backend_task_sequence = ingress_sequence;
 
-    assign backend_payload_valid = (state == STATE_FORWARD_PAYLOAD) &&
+    assign backend_payload_valid = (ingress_state == INGRESS_PAYLOAD) &&
                                    in_payload_valid;
     assign backend_payload_data = in_payload_data;
     assign backend_payload_last = in_payload_last;
-    assign in_payload_ready = (state == STATE_FORWARD_PAYLOAD) &&
+    assign in_payload_ready = (ingress_state == INGRESS_PAYLOAD) &&
                               backend_payload_ready;
 
-    assign backend_done_ready = (state == STATE_WAIT_BACKEND);
-    assign fmt_result_valid = (state == STATE_SUBMIT_RESULT);
-    assign fmt_result_job_id = active_job_id;
-    assign fmt_result_task_id = active_task_id;
-    assign fmt_result_status = active_result_status;
-    assign fmt_result_words = active_result_words;
-    assign fmt_result_compute_cycles = active_compute_cycles;
-    assign fmt_result_item_count = active_item_count;
-    assign fmt_result_user_tag = active_user_tag;
-    assign fmt_result_detail = active_result_detail;
+    wire done_entry_matches =
+        entry_valid[backend_done_sequence] &&
+        entry_dispatched[backend_done_sequence] &&
+        entry_running[backend_done_sequence] &&
+        !entry_complete[backend_done_sequence] &&
+        (entry_sequence[backend_done_sequence] == backend_done_sequence);
+    wire done_is_buffered =
+        (backend_done_result_words != 0) &&
+        (backend_done_result_words <= RESULT_POOL_WORDS);
+    wire done_is_direct = backend_done_result_words > RESULT_POOL_WORDS;
+    assign backend_done_ready = !capture_active && done_entry_matches &&
+        ((backend_done_result_words == 0) ||
+         (done_is_buffered && free_pool_available) ||
+         (done_is_direct && (backend_done_sequence == retire_ptr) &&
+          (retire_state == RETIRE_HEADER)));
+    wire done_accept = backend_done_valid && backend_done_ready;
 
-    assign fmt_result_data_valid = (state == STATE_FORWARD_RESULT) &&
-                                   backend_result_valid;
-    assign fmt_result_data = backend_result_data;
-    assign backend_result_ready =
-        (state == STATE_FORWARD_RESULT) ? fmt_result_data_ready :
-        (state == STATE_DISCARD_RESULT);
+    wire retire_available = entry_valid[retire_ptr] &&
+                            entry_complete[retire_ptr];
+    assign fmt_result_valid = (batch_state == BATCH_ACTIVE) &&
+                              (retire_state == RETIRE_HEADER) &&
+                              retire_available;
+    assign fmt_result_job_id = entry_job_id[retire_ptr];
+    assign fmt_result_task_id = entry_task_id[retire_ptr];
+    assign fmt_result_status = entry_result_status[retire_ptr];
+    assign fmt_result_words = entry_result_words[retire_ptr];
+    assign fmt_result_compute_cycles = entry_compute_cycles[retire_ptr];
+    assign fmt_result_item_count = entry_item_count[retire_ptr];
+    assign fmt_result_user_tag = entry_user_tag[retire_ptr];
+    assign fmt_result_detail = entry_result_detail[retire_ptr];
 
-    assign in_end_ready = dma_active && !end_pending;
-    assign fmt_finish_valid = (state == STATE_FINISH);
+    wire retire_header_fire = fmt_result_valid && fmt_result_ready;
+    wire buffered_result_fire = (retire_state == RETIRE_BUFFER) &&
+                                fmt_result_data_ready;
+    wire direct_result_fire = (retire_state == RETIRE_DIRECT) &&
+                              backend_result_valid && backend_result_ready;
+    wire buffered_result_last = buffered_result_fire &&
+        (retire_word_index + 32'd1 == entry_result_words[retire_ptr]);
+    wire direct_result_last = direct_result_fire &&
+        (retire_word_index + 32'd1 == entry_result_words[retire_ptr]);
+    wire reject_buffered_result = retire_header_fire && fmt_result_reject &&
+                                  !entry_direct[retire_ptr];
+    wire zero_word_result = retire_header_fire &&
+                            (entry_result_words[retire_ptr] == 0);
+    wire retire_fire = reject_buffered_result || zero_word_result ||
+                       buffered_result_last || direct_result_last;
+    wire retiring_rejected = reject_buffered_result ||
+                             ((retire_state == RETIRE_DIRECT) &&
+                              retire_reject && direct_result_last);
+    wire retiring_error = retiring_rejected ||
+                          (entry_result_status[retire_ptr] != 0);
+
+    assign fmt_result_data_valid =
+        (retire_state == RETIRE_BUFFER) ? 1'b1 :
+        (retire_state == RETIRE_DIRECT) ?
+            (!retire_reject && backend_result_valid) : 1'b0;
+    assign fmt_result_data =
+        (retire_state == RETIRE_BUFFER) ?
+        result_pool[{entry_pool_select[retire_ptr], retire_word_index[7:0]}] :
+        backend_result_data;
+    assign backend_result_ready = capture_active ? 1'b1 :
+        (retire_state == RETIRE_DIRECT) ?
+            (retire_reject ? 1'b1 : fmt_result_data_ready) : 1'b0;
+
+    assign in_end_ready = (batch_state == BATCH_ACTIVE) && !end_pending;
+    assign fmt_finish_valid = (batch_state == BATCH_FINISH);
     assign fmt_finish_completed_count = completed_count;
     assign fmt_finish_error_count = error_count;
     assign fmt_finish_batch_status = {24'd0, stored_end_status};
     assign fmt_finish_first_error_job_id = first_error_job_id;
     assign fmt_finish_detail = stored_end_detail;
 
+    wire [63:0] timeout_hit;
+    genvar timeout_index;
+    generate
+        for (timeout_index = 0; timeout_index < 64;
+             timeout_index = timeout_index + 1) begin : g_timeout_hit
+            assign timeout_hit[timeout_index] =
+                entry_valid[timeout_index] && entry_running[timeout_index] &&
+                !entry_complete[timeout_index] &&
+                (entry_compute_cycles[timeout_index] + 64'd1 >=
+                 ((entry_timeout_cycles[timeout_index] == 0) ?
+                  DEFAULT_TIMEOUT_CYCLES :
+                  entry_timeout_cycles[timeout_index]));
+        end
+    endgenerate
+    wire timeout_fire = (|timeout_hit) && !done_accept && !capture_active &&
+                        (retire_state != RETIRE_DIRECT);
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= STATE_IDLE;
-            active_job_id <= 32'd0;
-            active_task_id <= 8'd0;
-            active_task_flags <= 32'd0;
-            active_item_count <= 32'd0;
-            active_user_tag <= 32'd0;
-            active_timeout_cycles <= 32'd0;
-            active_result_status <= 24'd0;
-            active_result_words <= 32'd0;
-            active_result_detail <= 32'd0;
-            active_compute_cycles <= 64'd0;
-            result_word_index <= 32'd0;
+            batch_state <= BATCH_IDLE;
+            ingress_state <= INGRESS_IDLE;
+            retire_state <= RETIRE_HEADER;
+            allocate_ptr <= 6'd0;
+            retire_ptr <= 6'd0;
+            occupancy <= 7'd0;
+            ingress_sequence <= 6'd0;
+            ingress_large_full <= 1'b0;
             end_pending <= 1'b0;
             stored_end_status <= 8'd0;
             stored_end_detail <= 32'd0;
             completed_count <= 32'd0;
             error_count <= 32'd0;
             first_error_job_id <= 32'hFFFFFFFF;
+            pool_valid <= 0;
+            capture_active <= 1'b0;
+            capture_sequence <= 6'd0;
+            capture_pool_select <= 2'd0;
+            capture_word_index <= 9'd0;
+            capture_word_count <= 32'd0;
+            retire_word_index <= 32'd0;
+            retire_reject <= 1'b0;
             backend_abort <= 1'b0;
             legacy_reject <= 1'b0;
             dma_active <= 1'b0;
+            for (state_index = 0; state_index < 64;
+                 state_index = state_index + 1) begin
+                entry_valid[state_index] <= 1'b0;
+                entry_dispatched[state_index] <= 1'b0;
+                entry_running[state_index] <= 1'b0;
+                entry_complete[state_index] <= 1'b0;
+                entry_has_buffer[state_index] <= 1'b0;
+                entry_direct[state_index] <= 1'b0;
+                entry_sequence[state_index] <= state_index[5:0];
+                entry_job_id[state_index] <= 32'd0;
+                entry_task_id[state_index] <= 8'd0;
+                entry_flags[state_index] <= 32'd0;
+                entry_item_count[state_index] <= 32'd0;
+                entry_user_tag[state_index] <= 32'd0;
+                entry_timeout_cycles[state_index] <= 32'd0;
+                entry_result_status[state_index] <= 24'd0;
+                entry_result_words[state_index] <= 32'd0;
+                entry_result_detail[state_index] <= 32'd0;
+                entry_compute_cycles[state_index] <= 64'd0;
+                entry_pool_select[state_index] <= 2'd0;
+            end
         end else begin
             backend_abort <= 1'b0;
             legacy_reject <= legacy_start && dma_active;
 
-            if (in_end_valid && in_end_ready) begin
+            for (state_index = 0; state_index < 64;
+                 state_index = state_index + 1) begin
+                if (entry_valid[state_index] && entry_running[state_index] &&
+                    !entry_complete[state_index])
+                    entry_compute_cycles[state_index] <=
+                        entry_compute_cycles[state_index] + 64'd1;
+            end
+
+            case ({allocate_fire, retire_fire})
+                2'b10: occupancy <= occupancy + 7'd1;
+                2'b01: occupancy <= occupancy - 7'd1;
+                default: occupancy <= occupancy;
+            endcase
+
+            if (batch_accept) begin
+                batch_state <= BATCH_ACTIVE;
+                ingress_state <= INGRESS_IDLE;
+                retire_state <= RETIRE_HEADER;
+                allocate_ptr <= 6'd0;
+                retire_ptr <= 6'd0;
+                occupancy <= 7'd0;
+                end_pending <= 1'b0;
+                completed_count <= 32'd0;
+                error_count <= 32'd0;
+                first_error_job_id <= 32'hFFFFFFFF;
+                pool_valid <= 0;
+                capture_active <= 1'b0;
+                retire_word_index <= 32'd0;
+                retire_reject <= 1'b0;
+                dma_active <= 1'b1;
+                for (state_index = 0; state_index < 64;
+                     state_index = state_index + 1) begin
+                    entry_valid[state_index] <= 1'b0;
+                    entry_complete[state_index] <= 1'b0;
+                    entry_has_buffer[state_index] <= 1'b0;
+                    entry_direct[state_index] <= 1'b0;
+                end
+            end else begin
+                case (batch_state)
+                    BATCH_ACTIVE: begin
+                        if (end_pending && queue_empty &&
+                            (ingress_state == INGRESS_IDLE) &&
+                            !capture_active &&
+                            (retire_state == RETIRE_HEADER))
+                            batch_state <= BATCH_FINISH;
+                    end
+                    BATCH_FINISH: begin
+                        if (fmt_finish_valid && fmt_finish_ready)
+                            batch_state <= BATCH_WAIT_FORMATTER;
+                    end
+                    BATCH_WAIT_FORMATTER: begin
+                        if (fmt_batch_ready) begin
+                            batch_state <= BATCH_IDLE;
+                            end_pending <= 1'b0;
+                            dma_active <= 1'b0;
+                        end
+                    end
+                    default: begin end
+                endcase
+            end
+
+            if (end_fire) begin
                 end_pending <= 1'b1;
                 stored_end_status <= in_end_status;
                 stored_end_detail <= in_end_detail;
             end
 
-            case (state)
-                STATE_IDLE: begin
-                    if (in_batch_valid && in_batch_ready) begin
-                        completed_count <= 32'd0;
-                        error_count <= 32'd0;
-                        first_error_job_id <= 32'hFFFFFFFF;
-                        end_pending <= 1'b0;
-                        dma_active <= 1'b1;
-                        state <= STATE_WAIT_TASK;
+            if (allocate_fire) begin
+                entry_valid[allocate_ptr] <= 1'b1;
+                entry_dispatched[allocate_ptr] <= 1'b0;
+                entry_running[allocate_ptr] <= 1'b0;
+                entry_complete[allocate_ptr] <=
+                    (in_task_status != `MOL_DMA_STATUS_OK);
+                entry_has_buffer[allocate_ptr] <= 1'b0;
+                entry_direct[allocate_ptr] <= 1'b0;
+                entry_sequence[allocate_ptr] <= allocate_ptr;
+                entry_job_id[allocate_ptr] <= in_task_job_id;
+                entry_task_id[allocate_ptr] <= in_task_id;
+                entry_flags[allocate_ptr] <= in_task_flags;
+                entry_item_count[allocate_ptr] <= in_task_item_count;
+                entry_user_tag[allocate_ptr] <= in_task_user_tag;
+                entry_timeout_cycles[allocate_ptr] <= in_task_timeout_cycles;
+                entry_result_status[allocate_ptr] <= {16'd0, in_task_status};
+                entry_result_words[allocate_ptr] <= 32'd0;
+                entry_result_detail[allocate_ptr] <= in_task_detail;
+                entry_compute_cycles[allocate_ptr] <= 64'd0;
+                entry_pool_select[allocate_ptr] <= 2'd0;
+                ingress_sequence <= allocate_ptr;
+                ingress_large_full <=
+                    ((in_task_id == `MOL_DMA_TASK_GNN) ||
+                     (in_task_id == `MOL_DMA_TASK_PIPELINE)) &&
+                    ((in_task_flags & `MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0);
+                allocate_ptr <= allocate_ptr + 6'd1;
+                if (in_task_status == `MOL_DMA_STATUS_OK)
+                    ingress_state <= INGRESS_DISPATCH;
+            end
+
+            if (backend_task_valid && backend_task_ready) begin
+                entry_dispatched[ingress_sequence] <= 1'b1;
+                ingress_state <= INGRESS_PAYLOAD;
+            end
+            if (backend_payload_valid && backend_payload_ready &&
+                backend_payload_last) begin
+                entry_running[ingress_sequence] <= 1'b1;
+                ingress_state <= INGRESS_IDLE;
+            end
+
+            if (done_accept) begin
+                entry_result_status[backend_done_sequence] <=
+                    backend_done_status;
+                entry_result_words[backend_done_sequence] <=
+                    backend_done_result_words;
+                entry_result_detail[backend_done_sequence] <=
+                    backend_done_detail;
+                entry_running[backend_done_sequence] <= 1'b0;
+                if (backend_done_result_words == 0) begin
+                    entry_complete[backend_done_sequence] <= 1'b1;
+                end else if (done_is_buffered) begin
+                    pool_valid[free_pool_select] <= 1'b1;
+                    entry_has_buffer[backend_done_sequence] <= 1'b1;
+                    entry_pool_select[backend_done_sequence] <= free_pool_select;
+                    capture_active <= 1'b1;
+                    capture_sequence <= backend_done_sequence;
+                    capture_pool_select <= free_pool_select;
+                    capture_word_index <= 9'd0;
+                    capture_word_count <= backend_done_result_words;
+                end else begin
+                    entry_direct[backend_done_sequence] <= 1'b1;
+                    entry_complete[backend_done_sequence] <= 1'b1;
+                end
+            end
+
+            if (capture_active && backend_result_valid &&
+                backend_result_ready) begin
+                result_pool[{capture_pool_select, capture_word_index[7:0]}] <=
+                    backend_result_data;
+                if (capture_word_index + 9'd1 == capture_word_count) begin
+                    entry_complete[capture_sequence] <= 1'b1;
+                    capture_active <= 1'b0;
+                    capture_word_index <= 9'd0;
+                end else begin
+                    capture_word_index <= capture_word_index + 9'd1;
+                end
+            end
+
+            if (retire_header_fire) begin
+                retire_word_index <= 32'd0;
+                retire_reject <= fmt_result_reject;
+                if ((entry_result_words[retire_ptr] != 0) &&
+                    !(fmt_result_reject && !entry_direct[retire_ptr])) begin
+                    if (entry_direct[retire_ptr])
+                        retire_state <= RETIRE_DIRECT;
+                    else
+                        retire_state <= RETIRE_BUFFER;
+                end
+            end else if (buffered_result_fire || direct_result_fire) begin
+                if (!retire_fire)
+                    retire_word_index <= retire_word_index + 32'd1;
+            end
+
+            if (retire_fire) begin
+                if (entry_has_buffer[retire_ptr])
+                    pool_valid[entry_pool_select[retire_ptr]] <= 1'b0;
+                entry_valid[retire_ptr] <= 1'b0;
+                entry_dispatched[retire_ptr] <= 1'b0;
+                entry_running[retire_ptr] <= 1'b0;
+                entry_complete[retire_ptr] <= 1'b0;
+                entry_has_buffer[retire_ptr] <= 1'b0;
+                entry_direct[retire_ptr] <= 1'b0;
+                completed_count <= completed_count + 32'd1;
+                if (retiring_error) begin
+                    error_count <= error_count + 32'd1;
+                    if (error_count == 0)
+                        first_error_job_id <= entry_job_id[retire_ptr];
+                end
+                retire_ptr <= retire_ptr + 6'd1;
+                retire_state <= RETIRE_HEADER;
+                retire_word_index <= 32'd0;
+                retire_reject <= 1'b0;
+            end
+
+            if (timeout_fire) begin
+                backend_abort <= 1'b1;
+                for (state_index = 0; state_index < 64;
+                     state_index = state_index + 1) begin
+                    if (entry_valid[state_index] &&
+                        entry_running[state_index] &&
+                        !entry_complete[state_index]) begin
+                        entry_running[state_index] <= 1'b0;
+                        entry_complete[state_index] <= 1'b1;
+                        entry_has_buffer[state_index] <= 1'b0;
+                        entry_direct[state_index] <= 1'b0;
+                        entry_result_status[state_index] <=
+                            `MOL_DMA_STATUS_TASK_TIMEOUT;
+                        entry_result_words[state_index] <= 32'd0;
+                        entry_result_detail[state_index] <=
+                            entry_compute_cycles[state_index][31:0] + 32'd1;
                     end
                 end
-
-                STATE_WAIT_TASK: begin
-                    if (end_pending) begin
-                        state <= STATE_FINISH;
-                    end else if (in_task_valid && in_task_ready) begin
-                        active_job_id <= in_task_job_id;
-                        active_task_id <= in_task_id;
-                        active_task_flags <= in_task_flags;
-                        active_item_count <= in_task_item_count;
-                        active_user_tag <= in_task_user_tag;
-                        active_timeout_cycles <= in_task_timeout_cycles;
-                        active_result_detail <= in_task_detail;
-                        active_compute_cycles <= 64'd0;
-                        result_word_index <= 32'd0;
-                        if (in_task_status != `MOL_DMA_STATUS_OK) begin
-                            active_result_status <= in_task_status;
-                            active_result_words <= 32'd0;
-                            state <= STATE_SUBMIT_RESULT;
-                        end else begin
-                            active_result_status <= 24'd0;
-                            active_result_words <= 32'd0;
-                            state <= STATE_SEND_BACKEND;
-                        end
-                    end
-                end
-
-                STATE_SEND_BACKEND: begin
-                    if (backend_task_valid && backend_task_ready)
-                        state <= STATE_FORWARD_PAYLOAD;
-                end
-
-                STATE_FORWARD_PAYLOAD: begin
-                    if (in_payload_valid && in_payload_ready && in_payload_last) begin
-                        active_compute_cycles <= 64'd0;
-                        state <= STATE_WAIT_BACKEND;
-                    end
-                end
-
-                STATE_WAIT_BACKEND: begin
-                    if (backend_done_valid && backend_done_ready) begin
-                        active_result_status <= backend_done_status;
-                        active_result_words <= backend_done_result_words;
-                        active_result_detail <= backend_done_detail;
-                        result_word_index <= 32'd0;
-                        state <= STATE_SUBMIT_RESULT;
-                    end else if (active_compute_cycles + 64'd1 >= selected_timeout) begin
-                        backend_abort <= 1'b1;
-                        active_result_status <= `MOL_DMA_STATUS_TASK_TIMEOUT;
-                        active_result_words <= 32'd0;
-                        active_compute_cycles <= active_compute_cycles + 64'd1;
-                        active_result_detail <= active_compute_cycles[31:0] + 32'd1;
-                        state <= STATE_SUBMIT_RESULT;
-                    end else begin
-                        active_compute_cycles <= active_compute_cycles + 64'd1;
-                    end
-                end
-
-                STATE_SUBMIT_RESULT: begin
-                    if (fmt_result_valid && fmt_result_ready) begin
-                        result_word_index <= 32'd0;
-                        if (fmt_result_reject) begin
-                            active_result_status <= `MOL_DMA_STATUS_RESULT_OVERFLOW;
-                            if (active_result_words == 0)
-                                state <= STATE_COMPLETE_TASK;
-                            else
-                                state <= STATE_DISCARD_RESULT;
-                        end else if (active_result_words == 0) begin
-                            state <= STATE_COMPLETE_TASK;
-                        end else begin
-                            state <= STATE_FORWARD_RESULT;
-                        end
-                    end
-                end
-
-                STATE_FORWARD_RESULT: begin
-                    if (backend_result_valid && backend_result_ready) begin
-                        if (result_word_index + 32'd1 == active_result_words) begin
-                            result_word_index <= 32'd0;
-                            state <= STATE_COMPLETE_TASK;
-                        end else begin
-                            result_word_index <= result_word_index + 32'd1;
-                        end
-                    end
-                end
-
-                STATE_DISCARD_RESULT: begin
-                    if (backend_result_valid && backend_result_ready) begin
-                        if (result_word_index + 32'd1 == active_result_words) begin
-                            result_word_index <= 32'd0;
-                            state <= STATE_COMPLETE_TASK;
-                        end else begin
-                            result_word_index <= result_word_index + 32'd1;
-                        end
-                    end
-                end
-
-                STATE_COMPLETE_TASK: begin
-                    completed_count <= completed_count + 32'd1;
-                    if (active_result_status != 0) begin
-                        error_count <= error_count + 32'd1;
-                        if (error_count == 0)
-                            first_error_job_id <= active_job_id;
-                    end
-                    state <= STATE_WAIT_TASK;
-                end
-
-                STATE_FINISH: begin
-                    if (fmt_finish_valid && fmt_finish_ready) begin
-                        end_pending <= 1'b0;
-                        state <= STATE_WAIT_FORMATTER;
-                    end
-                end
-
-                STATE_WAIT_FORMATTER: begin
-                    if (fmt_batch_ready) begin
-                        dma_active <= 1'b0;
-                        state <= STATE_IDLE;
-                    end
-                end
-
-                default: state <= STATE_IDLE;
-            endcase
+                pool_valid <= 0;
+            end
         end
     end
+
+`ifndef SYNTHESIS
+    reg [5:0] expected_retire_sequence;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            expected_retire_sequence <= 6'd0;
+        else begin
+            if (batch_accept)
+                expected_retire_sequence <= 6'd0;
+            else if (retire_fire) begin
+                if (entry_sequence[retire_ptr] != expected_retire_sequence)
+                    $fatal(1, "non-monotonic retirement: got %0d expected %0d",
+                           entry_sequence[retire_ptr], expected_retire_sequence);
+                expected_retire_sequence <= expected_retire_sequence + 6'd1;
+            end
+            if (occupancy > 7'd64)
+                $fatal(1, "scoreboard occupancy exceeded 64: %0d", occupancy);
+            if (allocate_fire && entry_valid[allocate_ptr])
+                $fatal(1, "scoreboard overwrote live sequence %0d", allocate_ptr);
+            if (allocate_fire)
+                for (assertion_index = 0; assertion_index < 64;
+                     assertion_index = assertion_index + 1)
+                    if (entry_valid[assertion_index] &&
+                        (entry_sequence[assertion_index] == allocate_ptr))
+                        $fatal(1, "duplicate live sequence %0d", allocate_ptr);
+        end
+    end
+`endif
 
 endmodule

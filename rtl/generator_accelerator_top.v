@@ -653,6 +653,7 @@ module generator_accelerator_top #(
     wire [31:0] backend_task_flags;
     wire [31:0] backend_task_item_count;
     wire [31:0] backend_task_timeout_cycles;
+    wire [5:0] backend_task_sequence;
     wire backend_payload_valid;
     wire backend_payload_ready;
     wire [31:0] backend_payload_data;
@@ -662,7 +663,7 @@ module generator_accelerator_top #(
     wire [23:0] backend_done_status;
     wire [31:0] backend_done_result_words;
     wire [31:0] backend_done_detail;
-    wire [5:0] backend_done_sequence_unused;
+    wire [5:0] backend_done_sequence;
     wire backend_result_valid;
     wire backend_result_ready;
     wire [31:0] backend_result_data;
@@ -718,6 +719,7 @@ module generator_accelerator_top #(
         .backend_task_id(backend_task_id), .backend_task_flags(backend_task_flags),
         .backend_task_item_count(backend_task_item_count),
         .backend_task_timeout_cycles(backend_task_timeout_cycles),
+        .backend_task_sequence(backend_task_sequence),
         .backend_payload_valid(backend_payload_valid),
         .backend_payload_ready(backend_payload_ready),
         .backend_payload_data(backend_payload_data),
@@ -727,6 +729,7 @@ module generator_accelerator_top #(
         .backend_done_status(backend_done_status),
         .backend_done_result_words(backend_done_result_words),
         .backend_done_detail(backend_done_detail),
+        .backend_done_sequence(backend_done_sequence),
         .backend_result_valid(backend_result_valid),
         .backend_result_ready(backend_result_ready),
         .backend_result_data(backend_result_data), .backend_abort(backend_abort),
@@ -796,7 +799,7 @@ module generator_accelerator_top #(
         .task_valid(backend_task_valid), .task_ready(backend_task_ready),
         .task_id(backend_task_id), .task_flags(backend_task_flags),
         .task_item_count(backend_task_item_count),
-        .task_sequence(6'd0),
+        .task_sequence(backend_task_sequence),
         .payload_valid(backend_payload_valid),
         .payload_ready(backend_payload_ready),
         .payload_data(backend_payload_data), .payload_last(backend_payload_last),
@@ -804,7 +807,7 @@ module generator_accelerator_top #(
         .done_status(backend_done_status),
         .done_result_words(backend_done_result_words),
         .done_detail(backend_done_detail),
-        .done_sequence(backend_done_sequence_unused),
+        .done_sequence(backend_done_sequence),
         .result_valid(backend_result_valid), .result_ready(backend_result_ready),
         .result_data(backend_result_data), .abort(backend_abort),
         .engine_busy(engine_busy), .engine_start(engine_start),
