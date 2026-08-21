@@ -83,7 +83,7 @@ PS Ethernet / TCP 5001 / HTTP 80
 - PS/AXI-Lite 控制域：固定 100 MHz。
 - DMA/HP0 内存域：保留已验证的 125 MHz。
 - 加速器计算域：由可动态重配置 Clocking Wizard 输出 50/100/150 MHz。
-- LCD 像素域：独立固定 30 MHz。
+- LCD 像素域：独立固定 33 MHz。
 - DMA 与加速器之间继续使用异步 AXIS FIFO。
 - AXI-Lite 控制与动态计算域之间只通过同步器、握手和快照寄存器通信。
 
@@ -222,9 +222,9 @@ Z15 底板 J20 为与 ATK-MD0430R 对应的 40-pin RGB TFTLCD 接口。使用参
 
 - RGB888，24-bit 数据。
 - 800×480 有效显示区。
-- 30 MHz 像素时钟。
-- 典型水平总周期 928：HSYNC 3、back porch 40、active 800、front porch 48，其余用于边界修正。
-- 典型垂直总周期 525：VSYNC 3、back porch 32、active 480、front porch 13。
+- 33 MHz 像素时钟，采用资料包内官方 800×480 示例源码参数。
+- 水平时序：HSYNC 48、back porch 88、active 800、front porch 40，总周期 976。
+- 垂直时序：VSYNC 3、back porch 32、active 480、front porch 13，总周期 528。
 - 5V 模块供电，PL IO 为 3.3V LVTTL。
 
 LCD 不使用 DDR framebuffer，也不占用第二套 DMA。新增轻量级时序/字符渲染器，在像素域根据状态快照生成固定仪表盘：
@@ -278,7 +278,7 @@ Debug bitstream 生成 `.ltx`，上板保存至少三类证据：DMA Burst、三
 
 - Vivado `validate_bd_design` 无 Error/Critical Warning。
 - DRC Error = 0，route status 正常。
-- 50/100/125/150/30 MHz 相关时钟 WNS、WHS 均不为负。
+- 50/100/125/150/33 MHz 相关时钟 WNS、WHS 均不为负。
 - LUT、FF、BRAM、DSP 不超过 XC7Z015 资源。
 - 最终性能报告使用板上实测端到端时间，不用纯 RTL 周期替代。
 
