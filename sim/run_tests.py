@@ -213,6 +213,10 @@ TESTS = {
             SIM / "tb_pipeline_latency.sv",
         ],
     ),
+    "pipeline_parallel": (
+        "tb_pipeline_parallel",
+        [RTL / "dma_accelerator_backend.v", SIM / "tb_pipeline_parallel.sv"],
+    ),
 }
 
 

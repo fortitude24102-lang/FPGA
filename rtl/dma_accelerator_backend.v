@@ -57,11 +57,15 @@ module dma_accelerator_backend #(
     output wire fingerprint_db_select,
     output wire [4:0] fingerprint_addr,
     output wire [31:0] fingerprint_wdata,
+    output wire tanimoto_input_write_bank,
+    output wire tanimoto_input_run_bank,
     input  wire tanimoto_busy,
     input  wire tanimoto_valid,
     input  wire [31:0] tanimoto_similarity,
 
     output wire gnn_start,
+    output wire gnn_input_write_bank,
+    output wire gnn_input_run_bank,
     output wire gnn_feature_we,
     output wire [(((MAX_NODES*FEATURE_DIM+1)/2 <= 1) ? 1 :
                   $clog2((MAX_NODES*FEATURE_DIM+1)/2))-1:0]
@@ -87,6 +91,8 @@ module dma_accelerator_backend #(
     output wire [15:0] gnn_weight_wdata,
 
     output wire admet_start,
+    output wire admet_input_write_bank,
+    output wire admet_input_run_bank,
     output wire descriptor_we,
     output wire [4:0] descriptor_addr,
     output wire [DATA_WIDTH-1:0] descriptor_wdata,
@@ -126,6 +132,7 @@ module dma_accelerator_backend #(
     wire tani_fingerprint_db_select;
     wire [4:0] tani_fingerprint_addr;
     wire [31:0] tani_fingerprint_wdata;
+    wire tani_input_write_bank, tani_input_run_bank;
 
     wire gnn_task_ready_i, gnn_payload_ready_i, gnn_done_valid_i;
     wire [23:0] gnn_done_status_i;
@@ -138,6 +145,7 @@ module dma_accelerator_backend #(
            $clog2((MAX_NODES*FEATURE_DIM+1)/2))-1:0] gnn_feature_addr_i;
     wire [31:0] gnn_feature_wdata_i;
     wire [3:0] gnn_feature_wstrb_i;
+    wire gnn_input_write_bank_i, gnn_input_run_bank_i;
     wire [(((MAX_NODES*MAX_NODES+31)/32 <= 1) ? 1 :
            $clog2((MAX_NODES*MAX_NODES+31)/32))-1:0] gnn_adjacency_addr_i;
     wire [31:0] gnn_adjacency_wdata_i;
@@ -155,6 +163,7 @@ module dma_accelerator_backend #(
     wire admet_start_i, admet_descriptor_we_i;
     wire [4:0] admet_descriptor_addr_i;
     wire [DATA_WIDTH-1:0] admet_descriptor_wdata_i;
+    wire admet_input_write_bank_i, admet_input_run_bank_i;
 
     wire exclusive_task_ready_i, exclusive_payload_ready_i;
     wire exclusive_done_valid_i;
@@ -167,12 +176,14 @@ module dma_accelerator_backend #(
     wire exclusive_fingerprint_db_select;
     wire [4:0] exclusive_fingerprint_addr;
     wire [31:0] exclusive_fingerprint_wdata;
+    wire exclusive_tani_input_write_bank, exclusive_tani_input_run_bank;
     wire exclusive_gnn_start, exclusive_gnn_feature_we;
     wire [(((MAX_NODES*FEATURE_DIM+1)/2 <= 1) ? 1 :
            $clog2((MAX_NODES*FEATURE_DIM+1)/2))-1:0]
          exclusive_gnn_feature_addr;
     wire [31:0] exclusive_gnn_feature_wdata;
     wire [3:0] exclusive_gnn_feature_wstrb;
+    wire exclusive_gnn_input_write_bank, exclusive_gnn_input_run_bank;
     wire exclusive_gnn_adjacency_we;
     wire [(((MAX_NODES*MAX_NODES+31)/32 <= 1) ? 1 :
            $clog2((MAX_NODES*MAX_NODES+31)/32))-1:0]
@@ -190,6 +201,7 @@ module dma_accelerator_backend #(
     wire exclusive_admet_start, exclusive_descriptor_we;
     wire [4:0] exclusive_descriptor_addr;
     wire [DATA_WIDTH-1:0] exclusive_descriptor_wdata;
+    wire exclusive_admet_input_write_bank, exclusive_admet_input_run_bank;
     wire exclusive_admet_cfg_we;
     wire [1:0] exclusive_admet_cfg_model, exclusive_admet_cfg_layer;
     wire [15:0] exclusive_admet_cfg_addr, exclusive_admet_cfg_wdata;
@@ -289,6 +301,10 @@ module dma_accelerator_backend #(
                               tani_fingerprint_addr;
     assign fingerprint_wdata = exclusive_active ? exclusive_fingerprint_wdata :
                                tani_fingerprint_wdata;
+    assign tanimoto_input_write_bank = exclusive_active ?
+        exclusive_tani_input_write_bank : tani_input_write_bank;
+    assign tanimoto_input_run_bank = exclusive_active ?
+        exclusive_tani_input_run_bank : tani_input_run_bank;
     assign gnn_feature_we = exclusive_active ? exclusive_gnn_feature_we :
                             gnn_feature_we_i;
     assign gnn_feature_addr = exclusive_active ? exclusive_gnn_feature_addr :
@@ -297,6 +313,10 @@ module dma_accelerator_backend #(
                                gnn_feature_wdata_i;
     assign gnn_feature_wstrb = exclusive_active ? exclusive_gnn_feature_wstrb :
                                gnn_feature_wstrb_i;
+    assign gnn_input_write_bank = exclusive_active ?
+        exclusive_gnn_input_write_bank : gnn_input_write_bank_i;
+    assign gnn_input_run_bank = exclusive_active ?
+        exclusive_gnn_input_run_bank : gnn_input_run_bank_i;
     assign gnn_adjacency_we = exclusive_active ? exclusive_gnn_adjacency_we :
                               gnn_adjacency_we_i;
     assign gnn_adjacency_addr = exclusive_active ? exclusive_gnn_adjacency_addr :
@@ -318,6 +338,10 @@ module dma_accelerator_backend #(
                              admet_descriptor_addr_i;
     assign descriptor_wdata = exclusive_active ? exclusive_descriptor_wdata :
                               admet_descriptor_wdata_i;
+    assign admet_input_write_bank = exclusive_active ?
+        exclusive_admet_input_write_bank : admet_input_write_bank_i;
+    assign admet_input_run_bank = exclusive_active ?
+        exclusive_admet_input_run_bank : admet_input_run_bank_i;
     assign admet_cfg_we = exclusive_admet_cfg_we;
     assign admet_cfg_model = exclusive_admet_cfg_model;
     assign admet_cfg_layer = exclusive_admet_cfg_layer;
@@ -458,15 +482,19 @@ module dma_accelerator_backend #(
         .fingerprint_db_select(tani_fingerprint_db_select),
         .fingerprint_addr(tani_fingerprint_addr),
         .fingerprint_wdata(tani_fingerprint_wdata),
+        .tanimoto_input_write_bank(tani_input_write_bank),
+        .tanimoto_input_run_bank(tani_input_run_bank),
         .tanimoto_busy(tanimoto_busy), .tanimoto_valid(tanimoto_valid),
         .tanimoto_similarity(tanimoto_similarity),
-        .gnn_start(), .gnn_feature_we(), .gnn_feature_addr(),
+        .gnn_start(), .gnn_input_write_bank(), .gnn_input_run_bank(),
+        .gnn_feature_we(), .gnn_feature_addr(),
         .gnn_feature_wdata(), .gnn_feature_wstrb(), .gnn_adjacency_we(),
         .gnn_adjacency_addr(), .gnn_adjacency_wdata(),
         .gnn_adjacency_wstrb(), .gnn_output_re(), .gnn_output_addr(),
         .gnn_output_rdata(32'd0), .gnn_busy(1'b0), .gnn_valid(1'b0),
         .gnn_weight_we(), .gnn_weight_addr(), .gnn_weight_wdata(),
-        .admet_start(), .descriptor_we(), .descriptor_addr(),
+        .admet_start(), .admet_input_write_bank(), .admet_input_run_bank(),
+        .descriptor_we(), .descriptor_addr(),
         .descriptor_wdata(), .admet_busy(1'b0), .admet_valid(1'b0),
         .admet_predictions({4*DATA_WIDTH{1'b0}}), .admet_cfg_we(),
         .admet_cfg_model(), .admet_cfg_layer(), .admet_cfg_addr(),
@@ -493,8 +521,12 @@ module dma_accelerator_backend #(
         .engine_start(), .engine_done(),
         .tanimoto_start(), .fingerprint_we(), .fingerprint_db_select(),
         .fingerprint_addr(), .fingerprint_wdata(), .tanimoto_busy(1'b0),
+        .tanimoto_input_write_bank(), .tanimoto_input_run_bank(),
         .tanimoto_valid(1'b0), .tanimoto_similarity(32'd0),
-        .gnn_start(gnn_start_i), .gnn_feature_we(gnn_feature_we_i),
+        .gnn_start(gnn_start_i),
+        .gnn_input_write_bank(gnn_input_write_bank_i),
+        .gnn_input_run_bank(gnn_input_run_bank_i),
+        .gnn_feature_we(gnn_feature_we_i),
         .gnn_feature_addr(gnn_feature_addr_i),
         .gnn_feature_wdata(gnn_feature_wdata_i),
         .gnn_feature_wstrb(gnn_feature_wstrb_i),
@@ -505,7 +537,8 @@ module dma_accelerator_backend #(
         .gnn_output_re(gnn_output_re_i), .gnn_output_addr(gnn_output_addr_i),
         .gnn_output_rdata(gnn_output_rdata), .gnn_busy(gnn_busy),
         .gnn_valid(gnn_valid), .gnn_weight_we(), .gnn_weight_addr(),
-        .gnn_weight_wdata(), .admet_start(), .descriptor_we(),
+        .gnn_weight_wdata(), .admet_start(), .admet_input_write_bank(),
+        .admet_input_run_bank(), .descriptor_we(),
         .descriptor_addr(), .descriptor_wdata(), .admet_busy(1'b0),
         .admet_valid(1'b0), .admet_predictions({4*DATA_WIDTH{1'b0}}),
         .admet_cfg_we(), .admet_cfg_model(), .admet_cfg_layer(),
@@ -533,13 +566,18 @@ module dma_accelerator_backend #(
         .engine_start(), .engine_done(), .tanimoto_start(),
         .fingerprint_we(), .fingerprint_db_select(), .fingerprint_addr(),
         .fingerprint_wdata(), .tanimoto_busy(1'b0), .tanimoto_valid(1'b0),
-        .tanimoto_similarity(32'd0), .gnn_start(), .gnn_feature_we(),
+        .tanimoto_input_write_bank(), .tanimoto_input_run_bank(),
+        .tanimoto_similarity(32'd0), .gnn_start(), .gnn_input_write_bank(),
+        .gnn_input_run_bank(), .gnn_feature_we(),
         .gnn_feature_addr(), .gnn_feature_wdata(), .gnn_feature_wstrb(),
         .gnn_adjacency_we(), .gnn_adjacency_addr(), .gnn_adjacency_wdata(),
         .gnn_adjacency_wstrb(), .gnn_output_re(), .gnn_output_addr(),
         .gnn_output_rdata(32'd0), .gnn_busy(1'b0), .gnn_valid(1'b0),
         .gnn_weight_we(), .gnn_weight_addr(), .gnn_weight_wdata(),
-        .admet_start(admet_start_i), .descriptor_we(admet_descriptor_we_i),
+        .admet_start(admet_start_i),
+        .admet_input_write_bank(admet_input_write_bank_i),
+        .admet_input_run_bank(admet_input_run_bank_i),
+        .descriptor_we(admet_descriptor_we_i),
         .descriptor_addr(admet_descriptor_addr_i),
         .descriptor_wdata(admet_descriptor_wdata_i),
         .admet_busy(admet_busy), .admet_valid(admet_valid),
@@ -573,9 +611,13 @@ module dma_accelerator_backend #(
         .fingerprint_db_select(exclusive_fingerprint_db_select),
         .fingerprint_addr(exclusive_fingerprint_addr),
         .fingerprint_wdata(exclusive_fingerprint_wdata),
+        .tanimoto_input_write_bank(exclusive_tani_input_write_bank),
+        .tanimoto_input_run_bank(exclusive_tani_input_run_bank),
         .tanimoto_busy(tanimoto_busy), .tanimoto_valid(tanimoto_valid),
         .tanimoto_similarity(tanimoto_similarity),
         .gnn_start(exclusive_gnn_start),
+        .gnn_input_write_bank(exclusive_gnn_input_write_bank),
+        .gnn_input_run_bank(exclusive_gnn_input_run_bank),
         .gnn_feature_we(exclusive_gnn_feature_we),
         .gnn_feature_addr(exclusive_gnn_feature_addr),
         .gnn_feature_wdata(exclusive_gnn_feature_wdata),
@@ -591,6 +633,8 @@ module dma_accelerator_backend #(
         .gnn_weight_addr(exclusive_gnn_weight_addr),
         .gnn_weight_wdata(exclusive_gnn_weight_wdata),
         .admet_start(exclusive_admet_start),
+        .admet_input_write_bank(exclusive_admet_input_write_bank),
+        .admet_input_run_bank(exclusive_admet_input_run_bank),
         .descriptor_we(exclusive_descriptor_we),
         .descriptor_addr(exclusive_descriptor_addr),
         .descriptor_wdata(exclusive_descriptor_wdata),
@@ -644,6 +688,8 @@ module dma_accelerator_lane_controller #(
     output wire [2:0] engine_done,
 
     output wire          tanimoto_start,
+    output wire          tanimoto_input_write_bank,
+    output wire          tanimoto_input_run_bank,
     output reg           fingerprint_we,
     output reg           fingerprint_db_select,
     output reg  [4:0]    fingerprint_addr,
@@ -653,6 +699,8 @@ module dma_accelerator_lane_controller #(
     input  wire [31:0]   tanimoto_similarity,
 
     output wire gnn_start,
+    output wire gnn_input_write_bank,
+    output wire gnn_input_run_bank,
     output wire gnn_feature_we,
     output wire [(((MAX_NODES*FEATURE_DIM+1)/2 <= 1) ? 1 :
                   $clog2((MAX_NODES*FEATURE_DIM+1)/2))-1:0]
@@ -679,6 +727,8 @@ module dma_accelerator_lane_controller #(
     output reg [15:0]  gnn_weight_wdata,
 
     output wire admet_start,
+    output wire admet_input_write_bank,
+    output wire admet_input_run_bank,
     output reg  descriptor_we,
     output reg  [4:0] descriptor_addr,
     output reg  [DATA_WIDTH-1:0] descriptor_wdata,
@@ -738,6 +788,21 @@ module dma_accelerator_lane_controller #(
     reg [7:0] reload_admet_addr;
 
     reg [31:0] tanimoto_result;
+    reg [2:0] pipeline_done_mask;
+    reg [1:0] input_bank_occupied;
+    reg [1:0] input_bank_ready;
+    reg input_bank_loading;
+    reg input_compute_running;
+    reg summary_capture_pending;
+    reg [1:0] summary_capture_wait;
+    reg [10:0] item_payload_index;
+    reg [5:0] loaded_items;
+    reg [5:0] completed_items;
+    reg [5:0] run_item_index;
+    reg [5:0] bank_item_index [0:1];
+    reg [31:0] tanimoto_item_result [0:15];
+    reg [31:0] gnn_item_result [0:31];
+    reg unsupported_mode;
 
     reg tanimoto_start_reg;
     reg gnn_start_reg;
@@ -750,6 +815,9 @@ module dma_accelerator_lane_controller #(
     reg [31:0] gnn_adjacency_wdata_reg;
     reg gnn_output_re_reg;
     reg [OUTPUT_ADDR_W-1:0] gnn_output_addr_reg;
+    reg input_write_bank_reg;
+    reg input_write_port_bank_reg;
+    reg input_run_bank_reg;
 
     wire shared_mode = (active_flags & `MOL_DMA_FLAG_SHARED_QUERY) != 0;
     wire full_gnn = (active_flags & `MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0;
@@ -766,19 +834,27 @@ module dma_accelerator_lane_controller #(
      * are registered.  Stream the next candidate into the database RAM while
      * the previous comparison is finishing instead of inserting five idle
      * core cycles between every pair. */
-    assign payload_ready = (state == ST_LOAD) ||
+    wire ping_pong_mode = active_task == `MOL_DMA_TASK_PIPELINE ||
+                          (active_task == `MOL_DMA_TASK_GNN && !full_gnn);
+    assign payload_ready = (state == ST_LOAD &&
+        (!ping_pong_mode || input_bank_loading ||
+         !input_bank_occupied[input_write_bank_reg])) ||
         ((state == ST_WAIT_SHARED) && shared_mode &&
          (payload_index < shared_payload_words));
     assign done_valid = (state == ST_DONE);
-    assign done_status = 24'd0;
+    assign done_status = unsupported_mode ? 24'd11 : 24'd0;
     assign done_result_words = result_words_reg;
-    assign done_detail = 32'd0;
+    assign done_detail = unsupported_mode ? 32'h4655_4c4c : 32'd0;
     assign done_sequence = 6'd0;
     assign result_valid = result_valid_reg;
     assign result_data = result_data_reg;
 
     assign tanimoto_start = tanimoto_start_reg;
+    assign tanimoto_input_write_bank = input_write_port_bank_reg;
+    assign tanimoto_input_run_bank = input_run_bank_reg;
     assign gnn_start = gnn_start_reg;
+    assign gnn_input_write_bank = input_write_port_bank_reg;
+    assign gnn_input_run_bank = input_run_bank_reg;
     assign gnn_feature_we = gnn_feature_we_reg;
     assign gnn_feature_addr = gnn_feature_addr_reg;
     assign gnn_feature_wdata = gnn_feature_wdata_reg;
@@ -790,6 +866,8 @@ module dma_accelerator_lane_controller #(
     assign gnn_output_re = gnn_output_re_reg;
     assign gnn_output_addr = gnn_output_addr_reg;
     assign admet_start = admet_start_reg;
+    assign admet_input_write_bank = input_write_port_bank_reg;
+    assign admet_input_run_bank = input_run_bank_reg;
     assign engine_busy = {3{state != ST_IDLE}};
     assign engine_start = {admet_start_reg, gnn_start_reg,
                            tanimoto_start_reg};
@@ -858,13 +936,11 @@ module dma_accelerator_lane_controller #(
         input [31:0] index;
         begin
             if (id == `MOL_DMA_TASK_GNN)
-                is_gnn_result_word = 1'b1;
+                is_gnn_result_word =
+                    (flags & `MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0;
             else if (id == `MOL_DMA_TASK_PIPELINE &&
                      (flags & `MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0)
                 is_gnn_result_word = (index >= 1 && index <= 3200);
-            else if (id == `MOL_DMA_TASK_PIPELINE &&
-                     (flags & `MOL_DMA_FLAG_RETURN_INTERMEDIATE) != 0)
-                is_gnn_result_word = (index == 1);
             else
                 is_gnn_result_word = 1'b0;
         end
@@ -878,13 +954,21 @@ module dma_accelerator_lane_controller #(
         end
     endfunction
 
+    wire [31:0] intermediate_item = result_index / 6;
+    wire [31:0] intermediate_slot = result_index % 6;
     wire [31:0] small_linear_index =
         (active_task == `MOL_DMA_TASK_PIPELINE && full_gnn) ?
             result_index - 32'd3201 :
         (active_task == `MOL_DMA_TASK_PIPELINE && return_intermediate) ?
-            result_index - 32'd2 : result_index;
-    wire [5:0] small_read_addr = small_linear_index[7:2];
-    wire [1:0] small_read_bank = small_linear_index[1:0];
+            {intermediate_item[29:0], 2'b00} + intermediate_slot - 2 :
+            result_index;
+    wire [5:0] small_read_addr =
+        (active_task == `MOL_DMA_TASK_PIPELINE && return_intermediate &&
+         !full_gnn) ? intermediate_item[5:0] : small_linear_index[7:2];
+    wire [1:0] small_read_bank =
+        (active_task == `MOL_DMA_TASK_PIPELINE && return_intermediate &&
+         !full_gnn) ? intermediate_slot[1:0] - 2'd2 :
+                      small_linear_index[1:0];
     wire [127:0] small_bank_read_bus;
     wire [31:0] small_result_read =
         (small_read_bank == 0) ? small_bank_read_bus[31:0] :
@@ -899,11 +983,13 @@ module dma_accelerator_lane_controller #(
             wire shared_we = (state == ST_WAIT_SHARED) && tanimoto_valid &&
                              shared_result_count[1:0] == result_bank;
             wire admet_we = ((state == ST_WAIT_ADMET) ||
-                             (state == ST_PIPE_ADMET)) && admet_valid;
+                             (active_task == `MOL_DMA_TASK_PIPELINE &&
+                              input_compute_running)) && admet_valid;
             wire bank_we = shared_we || admet_we;
             wire [5:0] bank_waddr = shared_we ? shared_result_count[6:2] :
-                                     (state == ST_WAIT_ADMET ?
-                                         admet_item_index[5:0] : 6'd0);
+                                     (active_task == `MOL_DMA_TASK_PIPELINE ?
+                                         run_item_index :
+                                         admet_item_index[5:0]);
             wire [31:0] bank_wdata = shared_we ? tanimoto_similarity :
                 {{(32-DATA_WIDTH){1'b0}},
                  admet_predictions[result_bank*DATA_WIDTH +: DATA_WIDTH]};
@@ -929,6 +1015,20 @@ module dma_accelerator_lane_controller #(
             result_valid_reg <= 0;
             gnn_read_wait <= 0;
             tanimoto_result <= 0;
+            pipeline_done_mask <= 3'b000;
+            input_bank_occupied <= 2'b00;
+            input_bank_ready <= 2'b00;
+            input_bank_loading <= 1'b0;
+            input_compute_running <= 1'b0;
+            summary_capture_pending <= 1'b0;
+            summary_capture_wait <= 2'd0;
+            item_payload_index <= 11'd0;
+            loaded_items <= 6'd0;
+            completed_items <= 6'd0;
+            run_item_index <= 6'd0;
+            bank_item_index[0] <= 6'd0;
+            bank_item_index[1] <= 6'd0;
+            unsupported_mode <= 1'b0;
             tanimoto_start_reg <= 0;
             gnn_start_reg <= 0;
             admet_start_reg <= 0;
@@ -940,6 +1040,9 @@ module dma_accelerator_lane_controller #(
             gnn_adjacency_wdata_reg <= 0;
             gnn_output_re_reg <= 0;
             gnn_output_addr_reg <= 0;
+            input_write_bank_reg <= 1'b0;
+            input_write_port_bank_reg <= 1'b0;
+            input_run_bank_reg <= 1'b0;
             fingerprint_we <= 0;
             fingerprint_db_select <= 0;
             fingerprint_addr <= 0;
@@ -979,6 +1082,70 @@ module dma_accelerator_lane_controller #(
                 state <= ST_IDLE;
                 result_valid_reg <= 1'b0;
             end else begin
+                if (ping_pong_mode && input_compute_running &&
+                    !summary_capture_pending) begin
+                    if (active_task == `MOL_DMA_TASK_PIPELINE) begin
+                        pipeline_done_mask <= pipeline_done_mask |
+                            {admet_valid, gnn_valid, tanimoto_valid};
+                        if (tanimoto_valid)
+                            tanimoto_item_result[run_item_index[3:0]] <=
+                                tanimoto_similarity;
+                        if ((pipeline_done_mask |
+                             {admet_valid, gnn_valid, tanimoto_valid}) ==
+                            3'b111) begin
+                            gnn_output_addr_reg <= {OUTPUT_ADDR_W{1'b0}};
+                            gnn_output_re_reg <= 1'b1;
+                            summary_capture_pending <= 1'b1;
+                            summary_capture_wait <= 2'd2;
+                        end
+                    end else if (gnn_valid) begin
+                        gnn_output_addr_reg <= {OUTPUT_ADDR_W{1'b0}};
+                        gnn_output_re_reg <= 1'b1;
+                        summary_capture_pending <= 1'b1;
+                        summary_capture_wait <= 2'd2;
+                    end
+                end
+
+                if (summary_capture_pending) begin
+                    if (summary_capture_wait != 0)
+                        summary_capture_wait <= summary_capture_wait - 1'b1;
+                    else begin
+                        gnn_item_result[run_item_index] <= gnn_output_rdata;
+                        summary_capture_pending <= 1'b0;
+                        input_bank_occupied[input_run_bank_reg] <= 1'b0;
+                        completed_items <= completed_items + 1'b1;
+                        if (completed_items + 1'b1 == active_items) begin
+                            input_compute_running <= 1'b0;
+                            if (active_task == `MOL_DMA_TASK_PIPELINE)
+                                result_words_reg <= full_gnn ? 32'd3205 :
+                                    (return_intermediate ?
+                                     ({25'd0, active_items} << 2) +
+                                     ({25'd0, active_items} << 1) :
+                                     ({25'd0, active_items} << 2));
+                            else
+                                result_words_reg <= {25'd0, active_items};
+                            state <= ST_DONE;
+                        end else if (input_bank_ready[~input_run_bank_reg]) begin
+                            input_run_bank_reg <= ~input_run_bank_reg;
+                            input_write_bank_reg <= input_run_bank_reg;
+                            run_item_index <=
+                                bank_item_index[~input_run_bank_reg];
+                            input_bank_ready[~input_run_bank_reg] <= 1'b0;
+                            pipeline_done_mask <= 3'b000;
+                            input_compute_running <= 1'b1;
+                            if (active_task == `MOL_DMA_TASK_PIPELINE) begin
+                                tanimoto_start_reg <= 1'b1;
+                                gnn_start_reg <= 1'b1;
+                                admet_start_reg <= 1'b1;
+                            end else begin
+                                gnn_start_reg <= 1'b1;
+                            end
+                        end else begin
+                            input_compute_running <= 1'b0;
+                        end
+                    end
+                end
+
                 case (state)
                     ST_IDLE: begin
                         result_valid_reg <= 1'b0;
@@ -993,12 +1160,36 @@ module dma_accelerator_lane_controller #(
                             reload_admet_model <= 0;
                             reload_admet_layer <= 0;
                             reload_admet_addr <= 0;
+                            pipeline_done_mask <= 3'b000;
+                            input_bank_occupied <= 2'b00;
+                            input_bank_ready <= 2'b00;
+                            input_bank_loading <= 1'b0;
+                            input_compute_running <= 1'b0;
+                            summary_capture_pending <= 1'b0;
+                            summary_capture_wait <= 2'd0;
+                            item_payload_index <= 11'd0;
+                            loaded_items <= 6'd0;
+                            completed_items <= 6'd0;
+                            run_item_index <= 6'd0;
+                            input_write_bank_reg <= 1'b0;
+                            input_write_port_bank_reg <= 1'b0;
+                            input_run_bank_reg <= 1'b0;
+                            unsupported_mode <=
+                                task_id == `MOL_DMA_TASK_PIPELINE &&
+                                (task_flags & `MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0 &&
+                                task_item_count > 1;
                             state <= ST_LOAD;
                         end
                     end
 
                     ST_LOAD: begin
-                        if (payload_valid && payload_ready) begin
+                        if (payload_valid && payload_ready && unsupported_mode) begin
+                            if (payload_last) begin
+                                result_words_reg <= 32'd0;
+                                state <= ST_DONE;
+                            end
+                        end else if (payload_valid && payload_ready) begin
+                            input_write_port_bank_reg <= input_write_bank_reg;
                             payload_index <= payload_index + 1'b1;
                             case (active_task)
                                 `MOL_DMA_TASK_TANIMOTO: begin
@@ -1014,17 +1205,53 @@ module dma_accelerator_lane_controller #(
                                     end
                                 end
                                 `MOL_DMA_TASK_GNN: begin
-                                    if (payload_index < 79) begin
+                                    if (!full_gnn && !input_bank_loading) begin
+                                        input_bank_loading <= 1'b1;
+                                        input_bank_occupied[input_write_bank_reg] <=
+                                            1'b1;
+                                    end
+                                    if ((!full_gnn ? item_payload_index :
+                                         payload_index) < 79) begin
                                         gnn_adjacency_we_reg <= 1'b1;
-                                        gnn_adjacency_addr_reg <= payload_index[ADJ_ADDR_W-1:0];
+                                        gnn_adjacency_addr_reg <=
+                                            (!full_gnn ? item_payload_index :
+                                             payload_index);
                                         gnn_adjacency_wdata_reg <= payload_data;
                                     end else begin
                                         gnn_feature_we_reg <= 1'b1;
                                         gnn_feature_addr_reg <=
-                                            (payload_index-79);
+                                            (!full_gnn ? item_payload_index :
+                                             payload_index) - 79;
                                         gnn_feature_wdata_reg <= payload_data;
                                     end
-                                    if (payload_last) begin
+                                    if (!full_gnn &&
+                                        (item_payload_index == 1678 ||
+                                         payload_last)) begin
+                                        input_bank_loading <= 1'b0;
+                                        bank_item_index[input_write_bank_reg] <=
+                                            loaded_items;
+                                        loaded_items <= loaded_items + 1'b1;
+                                        item_payload_index <= 11'd0;
+                                        input_write_bank_reg <=
+                                            ~input_write_bank_reg;
+                                        if (!input_compute_running) begin
+                                            input_run_bank_reg <=
+                                                input_write_bank_reg;
+                                            run_item_index <= loaded_items;
+                                            input_compute_running <= 1'b1;
+                                            input_bank_ready[
+                                                input_write_bank_reg] <= 1'b0;
+                                            gnn_start_reg <= 1'b1;
+                                        end else begin
+                                            input_bank_ready[
+                                                input_write_bank_reg] <= 1'b1;
+                                        end
+                                        if (payload_last)
+                                            state <= ST_WAIT_GNN;
+                                    end else if (!full_gnn) begin
+                                        item_payload_index <=
+                                            item_payload_index + 1'b1;
+                                    end else if (payload_last) begin
                                         gnn_start_reg <= 1'b1;
                                         state <= ST_WAIT_GNN;
                                     end
@@ -1039,28 +1266,60 @@ module dma_accelerator_lane_controller #(
                                     end
                                 end
                                 `MOL_DMA_TASK_PIPELINE: begin
-                                    if (payload_index < 64) begin
+                                    if (!input_bank_loading) begin
+                                        input_bank_loading <= 1'b1;
+                                        input_bank_occupied[input_write_bank_reg] <=
+                                            1'b1;
+                                    end
+                                    if (item_payload_index < 64) begin
                                         fingerprint_we <= 1'b1;
-                                        fingerprint_db_select <= (payload_index >= 32);
-                                        fingerprint_addr <= payload_index[4:0];
+                                        fingerprint_db_select <=
+                                            (item_payload_index >= 32);
+                                        fingerprint_addr <= item_payload_index[4:0];
                                         fingerprint_wdata <= payload_data;
-                                    end else if (payload_index < 143) begin
+                                    end else if (item_payload_index < 143) begin
                                         gnn_adjacency_we_reg <= 1'b1;
                                         gnn_adjacency_addr_reg <=
-                                            (payload_index-64);
+                                            (item_payload_index-64);
                                         gnn_adjacency_wdata_reg <= payload_data;
-                                    end else if (payload_index < 1743) begin
+                                    end else if (item_payload_index < 1743) begin
                                         gnn_feature_we_reg <= 1'b1;
                                         gnn_feature_addr_reg <=
-                                            (payload_index-143);
+                                            (item_payload_index-143);
                                         gnn_feature_wdata_reg <= payload_data;
                                     end else begin
                                         descriptor_we <= 1'b1;
-                                        descriptor_addr <= payload_index-1743;
+                                        descriptor_addr <= item_payload_index-1743;
                                         descriptor_wdata <= payload_data[DATA_WIDTH-1:0];
                                     end
-                                    if (payload_last) begin
-                                        state <= ST_START_TANI;
+                                    if (item_payload_index == 1762) begin
+                                        input_bank_loading <= 1'b0;
+                                        bank_item_index[input_write_bank_reg] <=
+                                            loaded_items;
+                                        loaded_items <= loaded_items + 1'b1;
+                                        item_payload_index <= 11'd0;
+                                        input_write_bank_reg <=
+                                            ~input_write_bank_reg;
+                                        if (!input_compute_running) begin
+                                            input_run_bank_reg <=
+                                                input_write_bank_reg;
+                                            run_item_index <= loaded_items;
+                                            input_compute_running <= 1'b1;
+                                            input_bank_ready[
+                                                input_write_bank_reg] <= 1'b0;
+                                            tanimoto_start_reg <= 1'b1;
+                                            gnn_start_reg <= 1'b1;
+                                            admet_start_reg <= 1'b1;
+                                            pipeline_done_mask <= 3'b000;
+                                        end else begin
+                                            input_bank_ready[
+                                                input_write_bank_reg] <= 1'b1;
+                                        end
+                                        if (payload_last)
+                                            state <= ST_PIPE_TANI;
+                                    end else begin
+                                        item_payload_index <=
+                                            item_payload_index + 1'b1;
                                     end
                                 end
                                 `MOL_DMA_TASK_WEIGHT_RELOAD: begin
@@ -1097,9 +1356,13 @@ module dma_accelerator_lane_controller #(
 
                     ST_START_TANI: begin
                         tanimoto_start_reg <= 1'b1;
-                        if (active_task == `MOL_DMA_TASK_PIPELINE)
+                        if (active_task == `MOL_DMA_TASK_PIPELINE) begin
+                            gnn_start_reg <= 1'b1;
+                            admet_start_reg <= 1'b1;
+                            input_run_bank_reg <= input_write_bank_reg;
+                            pipeline_done_mask <= 3'b000;
                             state <= ST_PIPE_TANI;
-                        else if (shared_mode)
+                        end else if (shared_mode)
                             state <= ST_WAIT_SHARED;
                         else
                             state <= ST_WAIT_TANI;
@@ -1126,7 +1389,7 @@ module dma_accelerator_lane_controller #(
                         end
                     end
 
-                    ST_WAIT_GNN: if (gnn_valid) begin
+                    ST_WAIT_GNN: if (full_gnn && gnn_valid) begin
                         result_words_reg <= full_gnn ? 3200 : 1;
                         state <= ST_DONE;
                     end
@@ -1141,22 +1404,7 @@ module dma_accelerator_lane_controller #(
                         end
                     end
 
-                    ST_PIPE_TANI: if (tanimoto_valid) begin
-                        tanimoto_result <= tanimoto_similarity;
-                        gnn_start_reg <= 1'b1;
-                        state <= ST_PIPE_GNN;
-                    end
-
-                    ST_PIPE_GNN: if (gnn_valid) begin
-                        admet_start_reg <= 1'b1;
-                        state <= ST_PIPE_ADMET;
-                    end
-
-                    ST_PIPE_ADMET: if (admet_valid) begin
-                        result_words_reg <= full_gnn ? 3205 :
-                                            (return_intermediate ? 6 : 4);
-                        state <= ST_DONE;
-                    end
+                    ST_PIPE_TANI: begin end
 
                     ST_DONE: if (done_valid && done_ready) begin
                         result_index <= 0;
@@ -1177,13 +1425,25 @@ module dma_accelerator_lane_controller #(
                                 if (active_task == `MOL_DMA_TASK_TANIMOTO &&
                                     !shared_mode)
                                     result_data_reg <= tanimoto_result;
+                                else if (active_task == `MOL_DMA_TASK_GNN)
+                                    result_data_reg <=
+                                        gnn_item_result[result_index[4:0]];
                                 else if (active_task ==
                                          `MOL_DMA_TASK_WEIGHT_RELOAD)
                                     result_data_reg <= reload_epoch;
                                 else if (active_task == `MOL_DMA_TASK_PIPELINE &&
-                                         (full_gnn || return_intermediate) &&
-                                         result_index == 0)
-                                    result_data_reg <= tanimoto_result;
+                                         full_gnn && result_index == 0)
+                                    result_data_reg <= tanimoto_item_result[0];
+                                else if (active_task == `MOL_DMA_TASK_PIPELINE &&
+                                         return_intermediate &&
+                                         intermediate_slot == 0)
+                                    result_data_reg <= tanimoto_item_result[
+                                        intermediate_item[3:0]];
+                                else if (active_task == `MOL_DMA_TASK_PIPELINE &&
+                                         return_intermediate &&
+                                         intermediate_slot == 1)
+                                    result_data_reg <= gnn_item_result[
+                                        intermediate_item[4:0]];
                                 else
                                     result_data_reg <= small_result_read;
                                 result_valid_reg <= 1'b1;

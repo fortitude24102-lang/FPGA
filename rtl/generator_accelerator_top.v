@@ -132,9 +132,13 @@ module generator_accelerator_top #(
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_FEATURE_BASE = 18'h02000;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_GNN_OUT_BASE = 18'h04000;
 
+    wire [1023:0] query_fingerprint_bank0;
+    wire [1023:0] query_fingerprint_bank1;
+    wire [1023:0] database_fingerprint_bank0;
+    wire [1023:0] database_fingerprint_bank1;
     wire [1023:0] query_fingerprint;
     wire [1023:0] database_fingerprint;
-    reg [20*DATA_WIDTH-1:0] descriptor_buffer;
+    reg [2*20*DATA_WIDTH-1:0] descriptor_buffer;
 
     reg [C_S_AXI_ADDR_WIDTH-1:0] held_awaddr;
     reg [C_S_AXI_DATA_WIDTH-1:0] held_wdata;
@@ -174,31 +178,56 @@ module generator_accelerator_top #(
     wire dma_fingerprint_db_select;
     wire [4:0] dma_fingerprint_addr;
     wire [31:0] dma_fingerprint_wdata;
+    wire dma_tanimoto_input_write_bank;
+    wire dma_tanimoto_input_run_bank;
+    wire dma_gnn_input_write_bank;
+    wire dma_gnn_input_run_bank;
+    wire dma_admet_input_write_bank;
+    wire dma_admet_input_run_bank;
 
+    wire dma_tani_write_allowed = !tanimoto_busy ||
+        dma_tanimoto_input_write_bank != dma_tanimoto_input_run_bank;
     wire dma_query_write = dma_active && dma_fingerprint_we &&
-                           !dma_fingerprint_db_select;
+                           !dma_fingerprint_db_select && dma_tani_write_allowed;
     wire dma_db_write = dma_active && dma_fingerprint_we &&
-                        dma_fingerprint_db_select;
-    accelerator_fingerprint_bank u_query_bank (
+                        dma_fingerprint_db_select && dma_tani_write_allowed;
+    accelerator_fingerprint_bank u_query_bank0 (
         .clk(s_axi_aclk), .rst_n(s_axi_aresetn),
-        .we(dma_query_write || legacy_query_we),
+        .we((dma_query_write && !dma_tanimoto_input_write_bank) ||
+            legacy_query_we),
         .waddr(dma_query_write ? dma_fingerprint_addr :
                                  legacy_fingerprint_addr),
         .wdata(dma_query_write ? dma_fingerprint_wdata :
                                  legacy_fingerprint_wdata),
         .wstrb(dma_query_write ? 4'hf : legacy_fingerprint_wstrb),
-        .packed_data(query_fingerprint)
+        .packed_data(query_fingerprint_bank0)
     );
-    accelerator_fingerprint_bank u_database_bank (
+    accelerator_fingerprint_bank u_query_bank1 (
         .clk(s_axi_aclk), .rst_n(s_axi_aresetn),
-        .we(dma_db_write || legacy_db_we),
+        .we(dma_query_write && dma_tanimoto_input_write_bank),
+        .waddr(dma_fingerprint_addr), .wdata(dma_fingerprint_wdata),
+        .wstrb(4'hf), .packed_data(query_fingerprint_bank1)
+    );
+    accelerator_fingerprint_bank u_database_bank0 (
+        .clk(s_axi_aclk), .rst_n(s_axi_aresetn),
+        .we((dma_db_write && !dma_tanimoto_input_write_bank) || legacy_db_we),
         .waddr(dma_db_write ? dma_fingerprint_addr :
                               legacy_fingerprint_addr),
         .wdata(dma_db_write ? dma_fingerprint_wdata :
                               legacy_fingerprint_wdata),
         .wstrb(dma_db_write ? 4'hf : legacy_fingerprint_wstrb),
-        .packed_data(database_fingerprint)
+        .packed_data(database_fingerprint_bank0)
     );
+    accelerator_fingerprint_bank u_database_bank1 (
+        .clk(s_axi_aclk), .rst_n(s_axi_aresetn),
+        .we(dma_db_write && dma_tanimoto_input_write_bank),
+        .waddr(dma_fingerprint_addr), .wdata(dma_fingerprint_wdata),
+        .wstrb(4'hf), .packed_data(database_fingerprint_bank1)
+    );
+    assign query_fingerprint = dma_active && dma_tanimoto_input_run_bank ?
+        query_fingerprint_bank1 : query_fingerprint_bank0;
+    assign database_fingerprint = dma_active && dma_tanimoto_input_run_bank ?
+        database_fingerprint_bank1 : database_fingerprint_bank0;
 
     assign s_axi_awready = !aw_held && !s_axi_bvalid;
     assign s_axi_wready  = !w_held && !s_axi_bvalid;
@@ -246,7 +275,7 @@ module generator_accelerator_top #(
             legacy_fingerprint_addr <= 5'd0;
             legacy_fingerprint_wdata <= 32'd0;
             legacy_fingerprint_wstrb <= 4'd0;
-            descriptor_buffer    <= {20*DATA_WIDTH{1'b0}};
+            descriptor_buffer    <= {2*20*DATA_WIDTH{1'b0}};
         end else begin
             command_start <= 1'b0;
             command_clear <= 1'b0;
@@ -345,7 +374,8 @@ module generator_accelerator_top #(
             end
 
             if (dma_active && dma_descriptor_we)
-                descriptor_buffer[dma_descriptor_addr*DATA_WIDTH +:
+                descriptor_buffer[(dma_admet_input_write_bank*20 +
+                                   dma_descriptor_addr)*DATA_WIDTH +:
                                   DATA_WIDTH] <= dma_descriptor_wdata;
         end
     end
@@ -425,6 +455,10 @@ module generator_accelerator_top #(
     wire [GNN_OUTPUT_ADDR_W-1:0] core_gnn_output_addr =
         dma_active ? dma_gnn_output_addr : gnn_output_addr;
     wire core_admet_start = dma_active ? dma_admet_start : admet_start;
+    wire core_gnn_input_write_bank = dma_active ?
+        dma_gnn_input_write_bank : 1'b0;
+    wire core_gnn_input_run_bank = dma_active ?
+        dma_gnn_input_run_bank : 1'b0;
     wire core_gnn_weight_we = dma_active ? dma_gnn_weight_we : gnn_weight_we;
     wire [GNN_WEIGHT_ADDR_W-1:0] core_gnn_weight_addr =
         dma_active ? dma_gnn_weight_addr : gnn_weight_addr;
@@ -461,6 +495,8 @@ module generator_accelerator_top #(
         .clk(s_axi_aclk),
         .rst_n(s_axi_aresetn),
         .start(core_gnn_start),
+        .input_write_bank(core_gnn_input_write_bank),
+        .input_run_bank(core_gnn_input_run_bank),
         .node_features_in({GNN_FEATURE_BITS{1'b0}}),
         .adjacency_in({GNN_ADJ_BITS{1'b0}}),
         .node_features_out(),
@@ -490,7 +526,9 @@ module generator_accelerator_top #(
         .clk(s_axi_aclk),
         .rst_n(s_axi_aresetn),
         .start(core_admet_start),
-        .descriptors(descriptor_buffer),
+        .descriptors(dma_active && dma_admet_input_run_bank ?
+                     descriptor_buffer[20*DATA_WIDTH +: 20*DATA_WIDTH] :
+                     descriptor_buffer[0 +: 20*DATA_WIDTH]),
         .cfg_we(core_admet_cfg_we),
         .cfg_model(core_admet_cfg_model),
         .cfg_layer(core_admet_cfg_layer),
@@ -776,9 +814,14 @@ module generator_accelerator_top #(
         .fingerprint_db_select(dma_fingerprint_db_select),
         .fingerprint_addr(dma_fingerprint_addr),
         .fingerprint_wdata(dma_fingerprint_wdata),
+        .tanimoto_input_write_bank(dma_tanimoto_input_write_bank),
+        .tanimoto_input_run_bank(dma_tanimoto_input_run_bank),
         .tanimoto_busy(tanimoto_busy), .tanimoto_valid(tanimoto_valid),
         .tanimoto_similarity(tanimoto_similarity),
-        .gnn_start(dma_gnn_start), .gnn_feature_we(dma_gnn_feature_we),
+        .gnn_start(dma_gnn_start),
+        .gnn_input_write_bank(dma_gnn_input_write_bank),
+        .gnn_input_run_bank(dma_gnn_input_run_bank),
+        .gnn_feature_we(dma_gnn_feature_we),
         .gnn_feature_addr(dma_gnn_feature_addr),
         .gnn_feature_wdata(dma_gnn_feature_wdata),
         .gnn_feature_wstrb(dma_gnn_feature_wstrb),
@@ -794,6 +837,8 @@ module generator_accelerator_top #(
         .gnn_weight_addr(dma_gnn_weight_addr),
         .gnn_weight_wdata(dma_gnn_weight_wdata),
         .admet_start(dma_admet_start),
+        .admet_input_write_bank(dma_admet_input_write_bank),
+        .admet_input_run_bank(dma_admet_input_run_bank),
         .descriptor_we(dma_descriptor_we),
         .descriptor_addr(dma_descriptor_addr),
         .descriptor_wdata(dma_descriptor_wdata),

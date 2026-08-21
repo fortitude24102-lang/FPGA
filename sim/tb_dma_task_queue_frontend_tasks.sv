@@ -54,7 +54,7 @@ module tb_dma_task_queue_frontend_tasks;
         .batch_observed_words(batch_observed_words)
     );
 
-    reg [31:0] words [0:4599];
+    reg [31:0] words [0:55999];
     integer i, b, cycle_count;
     integer batch_events, task_events, payload_events, end_events;
     reg [7:0] seen_task_id, seen_task_status, seen_batch_status, seen_end_status;
@@ -108,6 +108,7 @@ module tb_dma_task_queue_frontend_tasks;
         input integer requested_payload_words;
         input integer requested_result_words;
         input integer requested_item_count;
+        input [7:0] expected_task_status;
         input [8*24-1:0] name;
         integer total_words;
         integer beat_count;
@@ -119,7 +120,7 @@ module tb_dma_task_queue_frontend_tasks;
             s_valid = 0;
             s_last = 0;
             repeat (4) @(negedge clk);
-            for (i = 0; i < 4600; i = i + 1)
+            for (i = 0; i < 56000; i = i + 1)
                 words[i] = 0;
             total_words = 16 + requested_payload_words;
             words[0] = 32'h4D4F4C51;
@@ -167,8 +168,11 @@ module tb_dma_task_queue_frontend_tasks;
             end
             @(posedge clk);
             if (timeout == 20000 || batch_events != 1 || task_events != 1 ||
-                payload_events != requested_payload_words || end_events != 1 ||
-                seen_batch_status != 0 || seen_task_status != 0 ||
+                payload_events != (expected_task_status == 0 ?
+                                   requested_payload_words : 0) ||
+                end_events != 1 ||
+                seen_batch_status != 0 ||
+                seen_task_status != expected_task_status ||
                 seen_end_status != 0 || seen_task_id != requested_task_id) begin
                 $display("FAIL %0s: event=%0d/%0d/%0d/%0d status=%0d/%0d/%0d id=%0d",
                          name, batch_events, task_events, payload_events, end_events,
@@ -181,11 +185,22 @@ module tb_dma_task_queue_frontend_tasks;
     endtask
 
     initial begin
-        run_valid_task(0, 32'h00000000, 64, 1, 1, "Tanimoto pair");
-        run_valid_task(1, 32'h00000000, 1679, 1, 1, "GNN summary");
-        run_valid_task(2, 32'h00000000, 60, 12, 3, "ADMET three items");
-        run_valid_task(3, 32'h00000200, 1763, 6, 1, "Pipeline intermediate");
-        run_valid_task(8'hFE, 32'h00000000, 4538, 1, 1, "Weight reload");
+        run_valid_task(0, 32'h00000000, 64, 1, 1, 0, "Tanimoto pair");
+        run_valid_task(1, 32'h00000000, 1679, 1, 1, 0, "GNN summary");
+        run_valid_task(1, 32'h00000000, 3358, 2, 2, 0, "GNN two summaries");
+        run_valid_task(1, 32'h00000000, 53728, 32, 32, 0, "GNN max batch");
+        run_valid_task(1, 32'h00000000, 55407, 33, 33, 6, "GNN rejects 33");
+        run_valid_task(2, 32'h00000000, 60, 12, 3, 0, "ADMET three items");
+        run_valid_task(3, 32'h00000200, 1763, 6, 1, 0, "Pipeline intermediate");
+        run_valid_task(3, 32'h00000000, 3526, 8, 2, 0, "Pipeline two summaries");
+        run_valid_task(3, 32'h00000000, 28208, 64, 16, 0, "Pipeline max batch");
+        run_valid_task(3, 32'h00000000, 29971, 68, 17, 6,
+                       "Pipeline rejects 17");
+        run_valid_task(3, 32'h00000300, 1763, 3205, 1, 0,
+                       "Pipeline FULL precedence");
+        run_valid_task(3, 32'h00000100, 3526, 6410, 2, 0,
+                       "Pipeline batched FULL shape");
+        run_valid_task(8'hFE, 32'h00000000, 4538, 1, 1, 0, "Weight reload");
         $display("ALL DMA FRONTEND TASK SHAPE TESTS PASSED");
         $finish;
     end

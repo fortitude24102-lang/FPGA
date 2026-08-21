@@ -26,6 +26,8 @@ module tb_gnn_latency;
         .clk(clk),
         .rst_n(rst_n),
         .start(start),
+        .input_write_bank(1'b0),
+        .input_run_bank(1'b0),
         .node_features_in(
             {MAX_NODES*FEATURE_DIM*DATA_WIDTH{1'b0}}
         ),

@@ -123,11 +123,15 @@ module dma_task_queue_frontend (
         reg [31:0] required_payload;
         reg [31:0] required_result;
         reg [31:0] allowed_flags;
+        reg [63:0] required_payload_wide;
+        reg [63:0] required_result_wide;
         begin
             checked_task_status = `MOL_DMA_STATUS_OK;
             required_payload = 32'd0;
             required_result = 32'd0;
             allowed_flags = 32'd0;
+            required_payload_wide = 64'd0;
+            required_result_wide = 64'd0;
 
             if (!((id <= `MOL_DMA_TASK_PIPELINE) ||
                   (id == `MOL_DMA_TASK_WEIGHT_RELOAD))) begin
@@ -154,11 +158,14 @@ module dma_task_queue_frontend (
                     end
                     `MOL_DMA_TASK_GNN: begin
                         allowed_flags = `MOL_DMA_FLAG_FULL_GNN_OUTPUT;
-                        if (item_count_value != 1)
+                        if (item_count_value > 32)
                             checked_task_status = `MOL_DMA_STATUS_BAD_ITEM_COUNT;
-                        required_payload = `MOL_DMA_PAYLOAD_WORDS_GNN_TOTAL;
-                        required_result = ((flags & `MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0) ?
-                                          `MOL_DMA_PAYLOAD_WORDS_GNN_FULL_RESULT : 32'd1;
+                        required_payload_wide = 64'd1679 * item_count_value;
+                        required_result_wide =
+                            ((flags & `MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0) ?
+                            64'd3200 * item_count_value : item_count_value;
+                        required_payload = required_payload_wide[31:0];
+                        required_result = required_result_wide[31:0];
                     end
                     `MOL_DMA_TASK_ADMET: begin
                         allowed_flags = 32'd0;
@@ -169,15 +176,17 @@ module dma_task_queue_frontend (
                     `MOL_DMA_TASK_PIPELINE: begin
                         allowed_flags = `MOL_DMA_FLAG_FULL_GNN_OUTPUT |
                                         `MOL_DMA_FLAG_RETURN_INTERMEDIATE;
-                        if (item_count_value != 1)
+                        if (item_count_value > 16)
                             checked_task_status = `MOL_DMA_STATUS_BAD_ITEM_COUNT;
-                        required_payload = `MOL_DMA_PAYLOAD_WORDS_PIPELINE_TOTAL;
+                        required_payload_wide = 64'd1763 * item_count_value;
                         if ((flags & `MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0)
-                            required_result = 32'd3205;
+                            required_result_wide = 64'd3205 * item_count_value;
                         else if ((flags & `MOL_DMA_FLAG_RETURN_INTERMEDIATE) != 0)
-                            required_result = 32'd6;
+                            required_result_wide = 64'd6 * item_count_value;
                         else
-                            required_result = 32'd4;
+                            required_result_wide = 64'd4 * item_count_value;
+                        required_payload = required_payload_wide[31:0];
+                        required_result = required_result_wide[31:0];
                     end
                     `MOL_DMA_TASK_WEIGHT_RELOAD: begin
                         allowed_flags = 32'd0;
@@ -189,6 +198,10 @@ module dma_task_queue_frontend (
                     default: checked_task_status = `MOL_DMA_STATUS_BAD_TASK;
                 endcase
 
+                if ((checked_task_status == `MOL_DMA_STATUS_OK) &&
+                    (required_payload_wide[63:32] != 0 ||
+                     required_result_wide[63:32] != 0))
+                    checked_task_status = `MOL_DMA_STATUS_BAD_LENGTH;
                 if ((checked_task_status == `MOL_DMA_STATUS_OK) &&
                     ((flags & ~allowed_flags) != 0))
                     checked_task_status = `MOL_DMA_STATUS_BAD_FLAGS;
