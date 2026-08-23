@@ -243,6 +243,42 @@ module tb_dma_backend_parallel;
         end
     endtask
 
+    // Result selection must cross a registered preparation stage after the
+    // metadata handshake.  This keeps the index/decode cone off the 150 MHz
+    // result-data register while preserving ready/valid backpressure.
+    task expect_registered_tanimoto_result;
+        begin
+            @(posedge clk);
+            #1;
+            if (result_valid)
+                $fatal(1, "Tanimoto result skipped the preparation register");
+            @(posedge clk);
+            #1;
+            if (!result_valid)
+                $fatal(1, "Tanimoto result did not emerge after preparation");
+        end
+    endtask
+
+    // GNN's compact result needs a registered address stage before the
+    // synchronous data preparation stage.  The two stages keep the shared
+    // result-index arithmetic and LUTRAM read off one timing path.
+    task expect_registered_gnn_result;
+        begin
+            @(posedge clk);
+            #1;
+            if (result_valid)
+                $fatal(1, "GNN result skipped the registered address stage");
+            @(posedge clk);
+            #1;
+            if (result_valid)
+                $fatal(1, "GNN result skipped the registered data stage");
+            @(posedge clk);
+            #1;
+            if (!result_valid)
+                $fatal(1, "GNN result did not emerge after both preparation stages");
+        end
+    endtask
+
     task drain_admet_results;
         input [5:0] seq;
         integer word_index;
@@ -282,6 +318,7 @@ module tb_dma_backend_parallel;
 
         accept_metadata(6'd12, 1, 3);
         phase = 12;
+        expect_registered_tanimoto_result();
         drain_one_result(6'd12, 32'h7400_0001, 12);
         phase = 13;
         if (seen_done[2] !== 1'b1)
@@ -292,6 +329,7 @@ module tb_dma_backend_parallel;
         phase = 15;
         accept_metadata(6'd10, 1, 2);
         phase = 16;
+        expect_registered_gnn_result();
         drain_one_result(6'd10, 32'h474e_4e31, 2);
         phase = 17;
         if (seen_start !== 3'b111 || seen_done !== 3'b111)

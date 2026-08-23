@@ -124,10 +124,10 @@ if {[llength $reset_polarity] != 0} {
     set_property value ACTIVE_LOW $reset_polarity
 }
 
-set_property core_revision 7 $core
+set_property core_revision 8 $core
 set_property display_name {Z15 Molecular Accelerator with DMA Batch Streams} $core
 set_property description \
-    {Tanimoto, GNN, ADMET and pipeline accelerator with AXI-Lite legacy control and 128-bit AXIS DMA batches} $core
+    {Variable-clock Tanimoto, GNN, ADMET and pipeline accelerator with AXI-Lite control, 128-bit AXIS DMA batches and debug probes} $core
 
 ipx::update_checksums $core
 ipx::save_core $core

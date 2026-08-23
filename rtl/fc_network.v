@@ -1,5 +1,54 @@
 `timescale 1ns / 1ps
 
+// One synchronous hidden-weight lane bank.  Splitting a double bank by the
+// existing MAC lanes preserves four reads per cycle while mapping each small
+// store to one BRAM18 instead of distributed RAM.
+module fc_hidden_weight_bank #(
+    parameter integer WIDTH = 16,
+    parameter integer DEPTH = 128,
+    parameter integer ADDR_WIDTH = 7
+)(
+    input  wire                  clk,
+    input  wire                  we,
+    input  wire [ADDR_WIDTH-1:0] waddr,
+    input  wire [WIDTH-1:0]      wdata,
+    input  wire                  re,
+    input  wire [ADDR_WIDTH-1:0] raddr,
+    output wire [WIDTH-1:0]      rdata
+);
+`ifdef SYNTHESIS
+    xpm_memory_sdpram #(
+        .MEMORY_SIZE(WIDTH*DEPTH),
+        .MEMORY_PRIMITIVE("block"),
+        .CLOCKING_MODE("common_clock"),
+        .WRITE_DATA_WIDTH_A(WIDTH),
+        .BYTE_WRITE_WIDTH_A(WIDTH),
+        .ADDR_WIDTH_A(ADDR_WIDTH),
+        .READ_DATA_WIDTH_B(WIDTH),
+        .ADDR_WIDTH_B(ADDR_WIDTH),
+        .READ_LATENCY_B(1),
+        .WRITE_MODE_B("read_first")
+    ) memory (
+        .clka(clk), .ena(we), .wea(we), .addra(waddr), .dina(wdata),
+        .clkb(clk), .enb(re), .addrb(raddr), .doutb(rdata),
+        .rstb(1'b0), .regceb(1'b1), .sleep(1'b0),
+        .injectsbiterra(1'b0), .injectdbiterra(1'b0),
+        .sbiterrb(), .dbiterrb()
+    );
+`else
+    (* ram_style = "distributed" *)
+    reg [WIDTH-1:0] memory [0:DEPTH-1];
+    reg [WIDTH-1:0] read_data;
+    always @(posedge clk) begin
+        if (we)
+            memory[waddr] <= wdata;
+        if (re)
+            read_data <= memory[raddr];
+    end
+    assign rdata = read_data;
+`endif
+endmodule
+
 // Parameterized, single-hidden-layer fully connected network.
 //
 // Numeric format: signed Q8.8 by default.  The hidden layer uses ReLU.
@@ -43,6 +92,11 @@ module fc_network #(
         (HIDDEN_DIM <= 1) ? 1 : $clog2(HIDDEN_DIM);
     localparam integer OUTPUT_IDX_W =
         (OUTPUT_DIM <= 1) ? 1 : $clog2(OUTPUT_DIM);
+    localparam integer HIDDEN_GROUPS =
+        (HIDDEN_DIM + HIDDEN_LANES - 1) / HIDDEN_LANES;
+    localparam integer HIDDEN_BANK_DEPTH = 2*INPUT_DIM*HIDDEN_GROUPS;
+    localparam integer HIDDEN_BANK_ADDR_W =
+        (HIDDEN_BANK_DEPTH <= 1) ? 1 : $clog2(HIDDEN_BANK_DEPTH);
 
     localparam [2:0] ST_IDLE         = 3'd0;
     localparam [2:0] ST_HIDDEN_INIT  = 3'd1;
@@ -64,12 +118,11 @@ module fc_network #(
     reg hidden_mac_valid;
     reg hidden_all_issued;
     reg signed [DATA_WIDTH-1:0] hidden_input_reg;
+    reg signed [DATA_WIDTH-1:0] hidden_memory_input;
+    reg hidden_memory_valid;
     reg signed [DATA_WIDTH-1:0] hidden_weight_reg
         [0:HIDDEN_LANES-1];
 
-    (* ram_style = "block" *)
-    reg signed [DATA_WIDTH-1:0] hidden_weights
-        [0:2*INPUT_DIM*HIDDEN_DIM-1];
     reg signed [DATA_WIDTH-1:0] hidden_biases [0:2*HIDDEN_DIM-1];
     (* ram_style = "block" *)
     reg signed [DATA_WIDTH-1:0] output_weights
@@ -87,6 +140,38 @@ module fc_network #(
     wire signed [DATA_WIDTH-1:0] selected_output_weight =
         output_weights[(active_weight_bank ? HIDDEN_DIM*OUTPUT_DIM : 0) +
                        hidden_idx*OUTPUT_DIM + output_idx];
+    wire [HIDDEN_BANK_ADDR_W-1:0] hidden_weight_read_addr =
+        (active_weight_bank ? INPUT_DIM*HIDDEN_GROUPS : 0) +
+        input_idx*HIDDEN_GROUPS + hidden_base/HIDDEN_LANES;
+    wire [HIDDEN_BANK_ADDR_W-1:0] cfg_hidden_write_addr =
+        (cfg_bank ? INPUT_DIM*HIDDEN_GROUPS : 0) +
+        (cfg_addr/HIDDEN_DIM)*HIDDEN_GROUPS +
+        ((cfg_addr % HIDDEN_DIM)/HIDDEN_LANES);
+    wire [HIDDEN_LANES*DATA_WIDTH-1:0] hidden_weight_read_bus;
+    wire hidden_weight_read_enable =
+        state == ST_HIDDEN_MAC && !hidden_all_issued;
+    wire hidden_weight_write_enable = cfg_we && cfg_layer == 2'd0 &&
+        cfg_addr < INPUT_DIM*HIDDEN_DIM &&
+        (state == ST_IDLE || cfg_bank != active_weight_bank);
+
+    genvar hidden_bank_idx;
+    generate
+        for (hidden_bank_idx = 0; hidden_bank_idx < HIDDEN_LANES;
+             hidden_bank_idx = hidden_bank_idx + 1) begin : gen_hidden_weight_bank
+            fc_hidden_weight_bank #(
+                .WIDTH(DATA_WIDTH), .DEPTH(HIDDEN_BANK_DEPTH),
+                .ADDR_WIDTH(HIDDEN_BANK_ADDR_W)
+            ) memory (
+                .clk(clk),
+                .we(hidden_weight_write_enable &&
+                    (cfg_addr % HIDDEN_DIM) % HIDDEN_LANES == hidden_bank_idx),
+                .waddr(cfg_hidden_write_addr), .wdata(cfg_wdata),
+                .re(hidden_weight_read_enable), .raddr(hidden_weight_read_addr),
+                .rdata(hidden_weight_read_bus[
+                    hidden_bank_idx*DATA_WIDTH +: DATA_WIDTH])
+            );
+        end
+    endgenerate
 
     wire signed [2*DATA_WIDTH-1:0] output_product =
         selected_hidden_value * selected_output_weight;
@@ -166,9 +251,6 @@ module fc_network #(
     always @(posedge clk) begin
         if (cfg_we && (state == ST_IDLE || cfg_bank != active_weight_bank)) begin
             case (cfg_layer)
-                2'd0: if (cfg_addr < INPUT_DIM*HIDDEN_DIM)
-                    hidden_weights[(cfg_bank ? INPUT_DIM*HIDDEN_DIM : 0) +
-                                   cfg_addr] <= cfg_wdata;
                 2'd1: if (cfg_addr < HIDDEN_DIM)
                     hidden_biases[(cfg_bank ? HIDDEN_DIM : 0) + cfg_addr] <=
                         cfg_wdata;
@@ -196,6 +278,8 @@ module fc_network #(
             hidden_mac_valid <= 1'b0;
             hidden_all_issued <= 1'b0;
             hidden_input_reg <= {DATA_WIDTH{1'b0}};
+            hidden_memory_input <= {DATA_WIDTH{1'b0}};
+            hidden_memory_valid <= 1'b0;
             for (lane_idx = 0; lane_idx < HIDDEN_LANES;
                  lane_idx = lane_idx + 1) begin
                 hidden_accumulator[lane_idx] <= {ACC_WIDTH{1'b0}};
@@ -215,6 +299,7 @@ module fc_network #(
                     input_idx <= {INPUT_IDX_W{1'b0}};
                     hidden_mac_valid <= 1'b0;
                     hidden_all_issued <= 1'b0;
+                    hidden_memory_valid <= 1'b0;
                     for (lane_idx = 0; lane_idx < HIDDEN_LANES;
                          lane_idx = lane_idx + 1) begin
                         if (hidden_base + lane_idx < HIDDEN_DIM)
@@ -250,29 +335,35 @@ module fc_network #(
                                     $signed(hidden_input_reg) *
                                     $signed(hidden_weight_reg[lane_idx]);
 
-                    if (!hidden_all_issued) begin
-                        hidden_input_reg <= selected_input;
+                    if (hidden_memory_valid) begin
+                        hidden_input_reg <= hidden_memory_input;
                         for (lane_idx = 0; lane_idx < HIDDEN_LANES;
                              lane_idx = lane_idx + 1)
                             if (hidden_base + lane_idx < HIDDEN_DIM)
                                 hidden_weight_reg[lane_idx] <=
-                                    hidden_weights[
-                                        (active_weight_bank ?
-                                         INPUT_DIM*HIDDEN_DIM : 0) +
-                                        input_idx*HIDDEN_DIM + hidden_base +
-                                        lane_idx
-                                    ];
+                                    hidden_weight_read_bus[
+                                        lane_idx*DATA_WIDTH +: DATA_WIDTH];
                             else
                                 hidden_weight_reg[lane_idx] <=
                                     {DATA_WIDTH{1'b0}};
                         hidden_mac_valid <= 1'b1;
+                    end else begin
+                        hidden_mac_valid <= 1'b0;
+                    end
+
+                    if (!hidden_all_issued) begin
+                        hidden_memory_input <= selected_input;
+                        hidden_memory_valid <= 1'b1;
                         if (input_idx == INPUT_DIM-1)
                             hidden_all_issued <= 1'b1;
                         else
                             input_idx <= input_idx + 1'b1;
-                    end else if (hidden_mac_valid) begin
-                        hidden_mac_valid <= 1'b0;
                     end else begin
+                        hidden_memory_valid <= 1'b0;
+                    end
+
+                    if (hidden_all_issued && !hidden_memory_valid &&
+                        !hidden_mac_valid) begin
                         state <= ST_HIDDEN_ACT;
                     end
                 end

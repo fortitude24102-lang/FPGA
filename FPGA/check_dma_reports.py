@@ -37,11 +37,32 @@ REQUIRED_KEYS = (
     "clock_100_present",
     "clock_125_present",
     "clock_100_wns",
+    "clock_100_tns",
     "clock_100_whs",
     "clock_125_wns",
+    "clock_125_tns",
     "clock_125_whs",
+    "clock_33_present",
+    "clock_core_100_present",
+    "clock_core_100_wns",
+    "clock_core_100_tns",
+    "clock_core_100_whs",
+    "clock_core_150_experimental",
     "global_wns",
+    "global_tns",
     "global_whs",
+    "build_mode",
+    "runtime_profiles_mhz",
+    "ila_present",
+    "ila_queue_occupancy_probe",
+    "ila_engine_start_probe",
+    "ila_engine_busy_probe",
+    "ila_engine_done_probe",
+    "ila_active_sequence_probe",
+    "ila_clock_profile_probe",
+    "result_pool_bram_cells",
+    "weight_bank_bram_cells",
+    "rtl_ip_sources_match",
     "bitstream_exists",
     "xsa_exists",
 )
@@ -113,7 +134,9 @@ def gate_report_directory(report_dir: Path) -> list[str]:
             return float("nan")
 
     for key in ("route_complete", "clock_100_present", "clock_125_present",
-                "bitstream_exists", "xsa_exists"):
+                "clock_33_present", "clock_core_100_present",
+                "clock_core_150_experimental",
+                "rtl_ip_sources_match", "bitstream_exists", "xsa_exists"):
         if number(key) != 1.0:
             failures.append(f"{key} must equal 1")
 
@@ -123,9 +146,49 @@ def gate_report_directory(report_dir: Path) -> list[str]:
 
     for key in ("clock_100_wns", "clock_100_whs",
                 "clock_125_wns", "clock_125_whs",
+                "clock_core_100_wns", "clock_core_100_whs",
                 "global_wns", "global_whs"):
         if number(key) <= 0.0:
             failures.append(f"{key} is not positive ({metrics[key]} ns)")
+
+    for key in ("clock_100_tns", "clock_125_tns",
+                "clock_core_100_tns", "global_tns"):
+        if number(key) < 0.0:
+            failures.append(f"{key} is negative ({metrics[key]} ns)")
+
+    if metrics["runtime_profiles_mhz"] != "50,100,150":
+        failures.append(
+            "runtime_profiles_mhz must equal 50,100,150 "
+            f"(got {metrics['runtime_profiles_mhz']})"
+        )
+
+    build_mode = metrics["build_mode"]
+    probe_keys = (
+        "ila_queue_occupancy_probe",
+        "ila_engine_start_probe",
+        "ila_engine_busy_probe",
+        "ila_engine_done_probe",
+        "ila_active_sequence_probe",
+        "ila_clock_profile_probe",
+    )
+    if build_mode == "release":
+        if number("ila_present") != 0.0:
+            failures.append("release build contains ILA")
+        for key in probe_keys:
+            if number(key) != 0.0:
+                failures.append(f"release {key} must equal 0")
+    elif build_mode == "debug":
+        if number("ila_present") != 1.0:
+            failures.append("debug ila_present must equal 1")
+        for key in probe_keys:
+            if number(key) != 1.0:
+                failures.append(f"debug {key} must equal 1")
+    else:
+        failures.append(f"build_mode must be debug or release (got {build_mode})")
+
+    for key in ("result_pool_bram_cells", "weight_bank_bram_cells"):
+        if number(key) <= 0.0:
+            failures.append(f"{key} must be positive (got {metrics[key]})")
 
     dsp_used = number("dsp_used")
     if dsp_used > 80.0:

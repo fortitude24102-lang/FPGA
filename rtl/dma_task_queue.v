@@ -3,7 +3,10 @@
 `include "mol_dma_protocol.vh"
 
 module dma_task_queue #(
-    parameter [31:0] DEFAULT_TIMEOUT_CYCLES = 32'd1000000
+    parameter [31:0] DEFAULT_TIMEOUT_CYCLES = 32'd1000000,
+    // The AXI ingress owns a 6-bit sequence field; the on-chip scoreboard
+    // keeps 16 live tasks and backpressures the host for the remainder.
+    parameter integer SCOREBOARD_DEPTH = 16
 ) (
     input  wire         clk,
     input  wire         rst_n,
@@ -100,7 +103,9 @@ module dma_task_queue #(
     input  wire         legacy_active,
     input  wire         legacy_start,
     output reg          legacy_reject,
-    output reg          dma_active
+    output reg          dma_active,
+    output wire [6:0]   debug_queue_occupancy,
+    output wire [5:0]   debug_active_sequence
 );
 
     localparam [1:0] BATCH_IDLE           = 2'd0;
@@ -114,16 +119,18 @@ module dma_task_queue #(
     localparam [1:0] RETIRE_HEADER        = 2'd0;
     localparam [1:0] RETIRE_BUFFER        = 2'd1;
     localparam [1:0] RETIRE_DIRECT        = 2'd2;
-    localparam integer RESULT_POOL_SLOTS = 64;
+    localparam integer RESULT_POOL_SLOTS = SCOREBOARD_DEPTH;
     localparam integer RESULT_POOL_WORDS = 256;
 
     reg [1:0] batch_state;
     reg [1:0] ingress_state;
     reg [1:0] retire_state;
-    reg [5:0] allocate_ptr;
-    reg [5:0] retire_ptr;
+    reg [4:0] allocate_ptr;
+    reg [4:0] retire_ptr;
+    reg [4:0] ingress_slot;
     reg [6:0] occupancy;
     reg [5:0] ingress_sequence;
+    reg [5:0] next_sequence;
     reg ingress_large_full;
     reg direct_exclusive;
     reg abort_guard;
@@ -134,42 +141,73 @@ module dma_task_queue #(
     reg [31:0] error_count;
     reg [31:0] first_error_job_id;
 
-    reg entry_valid [0:63];
-    reg entry_dispatched [0:63];
-    reg entry_running [0:63];
-    reg entry_complete [0:63];
-    reg entry_has_buffer [0:63];
-    reg entry_direct [0:63];
-    reg [5:0] entry_sequence [0:63];
-    reg [31:0] entry_job_id [0:63];
-    reg [7:0] entry_task_id [0:63];
-    reg [31:0] entry_flags [0:63];
-    reg [31:0] entry_item_count [0:63];
-    reg [31:0] entry_user_tag [0:63];
-    reg [31:0] entry_timeout_cycles [0:63];
-    reg [31:0] entry_result_capacity [0:63];
-    reg [31:0] entry_direct_words [0:63];
-    reg [23:0] entry_result_status [0:63];
-    reg [31:0] entry_result_words [0:63];
-    reg [31:0] entry_result_detail [0:63];
-    reg [63:0] entry_compute_cycles [0:63];
-    reg [5:0] entry_pool_select [0:63];
+    reg entry_valid [0:SCOREBOARD_DEPTH-1];
+    reg entry_dispatched [0:SCOREBOARD_DEPTH-1];
+    reg entry_running [0:SCOREBOARD_DEPTH-1];
+    reg entry_complete [0:SCOREBOARD_DEPTH-1];
+    reg entry_has_buffer [0:SCOREBOARD_DEPTH-1];
+    reg entry_direct [0:SCOREBOARD_DEPTH-1];
+    (* ram_style = "distributed" *)
+    reg [5:0] entry_sequence [0:SCOREBOARD_DEPTH-1];
+    (* ram_style = "distributed" *)
+    reg [31:0] entry_job_id [0:SCOREBOARD_DEPTH-1];
+    (* ram_style = "distributed" *)
+    reg [7:0] entry_task_id [0:SCOREBOARD_DEPTH-1];
+    (* ram_style = "distributed" *)
+    reg [31:0] entry_flags [0:SCOREBOARD_DEPTH-1];
+    (* ram_style = "distributed" *)
+    reg [31:0] entry_item_count [0:SCOREBOARD_DEPTH-1];
+    (* ram_style = "distributed" *)
+    reg [31:0] entry_user_tag [0:SCOREBOARD_DEPTH-1];
+    reg [31:0] entry_timeout_cycles [0:SCOREBOARD_DEPTH-1];
+    (* ram_style = "distributed" *)
+    reg [31:0] entry_result_capacity [0:SCOREBOARD_DEPTH-1];
+    (* ram_style = "distributed" *)
+    reg [31:0] entry_direct_words [0:SCOREBOARD_DEPTH-1];
+    (* ram_style = "distributed" *)
+    reg [23:0] entry_result_status [0:SCOREBOARD_DEPTH-1];
+    (* ram_style = "distributed" *)
+    reg [31:0] entry_result_words [0:SCOREBOARD_DEPTH-1];
+    (* ram_style = "distributed" *)
+    reg [31:0] entry_result_detail [0:SCOREBOARD_DEPTH-1];
+    // Task timeouts are 32-bit.  A 32-bit counter is exact because timeout
+    // checks use the pre-increment value against timeout-1, including the
+    // 0xffffffff boundary; formatter output is zero-extended below.
+    reg [31:0] entry_compute_cycles [0:SCOREBOARD_DEPTH-1];
+    reg [4:0] entry_pool_select [0:SCOREBOARD_DEPTH-1];
+
+    // A 16-entry scoreboard deliberately keeps the wire sequence namespace
+    // at 6 bits.  Map the 64 sequence values to their live physical slots so
+    // completion is a direct lookup, rather than a 32-way associative scan.
+    reg [4:0] sequence_slot [0:63];
+    reg sequence_live [0:63];
 
     reg [RESULT_POOL_SLOTS-1:0] pool_valid;
+`ifndef SYNTHESIS
     reg [31:0] result_pool [0:RESULT_POOL_SLOTS*RESULT_POOL_WORDS-1];
+    reg [31:0] result_pool_read_data;
+`else
+    wire [31:0] result_pool_read_data;
+`endif
     reg capture_active;
-    reg [5:0] capture_sequence;
-    reg [5:0] capture_pool_select;
+    reg [4:0] capture_slot;
+    reg [4:0] capture_pool_select;
     reg [8:0] capture_word_index;
     reg [31:0] capture_word_count;
     reg [31:0] retire_word_index;
     reg retire_reject;
 
     integer state_index;
+    integer completion_index;
     integer assertion_index;
+    integer sequence_index;
 
-    wire queue_full = (occupancy == 7'd64);
+    wire queue_full = (occupancy == SCOREBOARD_DEPTH);
     wire queue_empty = (occupancy == 7'd0);
+    assign debug_queue_occupancy = occupancy;
+    assign debug_active_sequence = entry_valid[retire_ptr] ?
+                                   entry_sequence[retire_ptr] : 6'd0;
+
     wire task_requests_full =
         (in_task_flags & `MOL_DMA_FLAG_FULL_GNN_OUTPUT) != 0;
     wire task_is_legal_direct = task_requests_full &&
@@ -202,16 +240,16 @@ module dma_task_queue #(
     assign backend_task_valid = (ingress_state == INGRESS_DISPATCH) &&
                                 !timeout_request && !abort_guard &&
                                 ((ingress_large_full &&
-                                  (ingress_sequence == retire_ptr)) ||
+                                  (ingress_slot == retire_ptr)) ||
                                  (!ingress_large_full &&
-                                  !pool_valid[ingress_sequence]));
-    assign backend_task_id = entry_task_id[ingress_sequence];
-    assign backend_task_flags = entry_flags[ingress_sequence];
-    assign backend_task_item_count = entry_item_count[ingress_sequence];
-    assign backend_task_user_tag = entry_user_tag[ingress_sequence];
+                                  !pool_valid[ingress_slot]));
+    assign backend_task_id = entry_task_id[ingress_slot];
+    assign backend_task_flags = entry_flags[ingress_slot];
+    assign backend_task_item_count = entry_item_count[ingress_slot];
+    assign backend_task_user_tag = entry_user_tag[ingress_slot];
     assign backend_task_timeout_cycles =
-        (entry_timeout_cycles[ingress_sequence] == 0) ?
-        DEFAULT_TIMEOUT_CYCLES : entry_timeout_cycles[ingress_sequence];
+        (entry_timeout_cycles[ingress_slot] == 0) ?
+        DEFAULT_TIMEOUT_CYCLES : entry_timeout_cycles[ingress_slot];
     assign backend_task_sequence = ingress_sequence;
     wire backend_task_fire = backend_task_valid && backend_task_ready;
 
@@ -234,22 +272,30 @@ module dma_task_queue #(
         (^backend_done_status !== 1'bx) &&
         (^backend_done_result_words !== 1'bx) &&
         (^backend_done_detail !== 1'bx);
-    wire done_entry_matches = done_metadata_known &&
-        entry_valid[backend_done_sequence] &&
-        entry_dispatched[backend_done_sequence] &&
-        entry_running[backend_done_sequence] &&
-        !entry_complete[backend_done_sequence] &&
-        (entry_sequence[backend_done_sequence] == backend_done_sequence);
-    wire done_is_buffered = !entry_direct[backend_done_sequence] &&
+    // Never use X completion metadata as an array index.  The known check
+    // below still rejects it; this only keeps simulation deterministic.
+    wire [5:0] done_sequence_safe = done_metadata_known ?
+                                backend_done_sequence : 6'd0;
+    wire [4:0] done_entry_slot = sequence_slot[done_sequence_safe];
+    wire done_entry_found = sequence_live[done_sequence_safe] &&
+        entry_valid[done_entry_slot] &&
+        entry_dispatched[done_entry_slot] &&
+        entry_running[done_entry_slot] &&
+        !entry_complete[done_entry_slot] &&
+        (entry_sequence[done_entry_slot] == done_sequence_safe);
+    wire done_entry_matches = done_metadata_known && done_entry_found;
+    wire done_is_buffered = done_entry_found &&
+        !entry_direct[done_entry_slot] &&
         (backend_done_result_words != 0) &&
         (backend_done_result_words <= RESULT_POOL_WORDS) &&
         (backend_done_result_words <=
-         entry_result_capacity[backend_done_sequence]);
-    wire done_is_direct = entry_direct[backend_done_sequence] &&
+         entry_result_capacity[done_entry_slot]);
+    wire done_is_direct = done_entry_found &&
+        entry_direct[done_entry_slot] &&
         (backend_done_result_words ==
-         entry_direct_words[backend_done_sequence]) &&
+         entry_direct_words[done_entry_slot]) &&
         (backend_done_result_words <=
-         entry_result_capacity[backend_done_sequence]);
+         entry_result_capacity[done_entry_slot]);
     wire done_is_zero = backend_done_result_words == 0;
     wire done_shape_valid = done_is_zero || done_is_buffered ||
                             done_is_direct;
@@ -267,7 +313,8 @@ module dma_task_queue #(
     assign fmt_result_task_id = entry_task_id[retire_ptr];
     assign fmt_result_status = entry_result_status[retire_ptr];
     assign fmt_result_words = entry_result_words[retire_ptr];
-    assign fmt_result_compute_cycles = entry_compute_cycles[retire_ptr];
+    assign fmt_result_compute_cycles =
+        {32'd0, entry_compute_cycles[retire_ptr]};
     assign fmt_result_item_count = entry_item_count[retire_ptr];
     assign fmt_result_user_tag = entry_user_tag[retire_ptr];
     assign fmt_result_detail = entry_result_detail[retire_ptr];
@@ -293,13 +340,58 @@ module dma_task_queue #(
     wire retiring_error = retiring_rejected ||
                           (entry_result_status[retire_ptr] != 0);
 
+    wire result_pool_write_enable = rst_n && capture_active &&
+                                    backend_result_valid &&
+                                    backend_result_ready;
+    wire [12:0] result_pool_write_addr =
+        {capture_pool_select, capture_word_index[7:0]};
+    wire result_pool_read_enable = rst_n &&
+        ((retire_header_fire && !entry_direct[retire_ptr] &&
+          !fmt_result_reject && (entry_result_words[retire_ptr] != 0)) ||
+         (buffered_result_fire && !buffered_result_last));
+    wire [12:0] result_pool_read_addr = retire_header_fire ?
+        {entry_pool_select[retire_ptr], 8'd0} :
+        {entry_pool_select[retire_ptr], retire_word_index[7:0] + 8'd1};
+
+`ifdef SYNTHESIS
+    xpm_memory_sdpram #(
+        .MEMORY_SIZE(262144),
+        .MEMORY_PRIMITIVE("block"),
+        .CLOCKING_MODE("common_clock"),
+        .WRITE_DATA_WIDTH_A(32),
+        .BYTE_WRITE_WIDTH_A(32),
+        .ADDR_WIDTH_A(13),
+        .READ_DATA_WIDTH_B(32),
+        .ADDR_WIDTH_B(13),
+        .READ_LATENCY_B(1),
+        .WRITE_MODE_B("read_first")
+    ) result_pool_bram (
+        .clka(clk),
+        .ena(result_pool_write_enable),
+        .wea(result_pool_write_enable),
+        .addra(result_pool_write_addr),
+        .dina(backend_result_data),
+        .clkb(clk),
+        .enb(result_pool_read_enable),
+        .addrb(result_pool_read_addr),
+        .doutb(result_pool_read_data),
+        .rstb(1'b0),
+        .regceb(1'b1),
+        .sleep(1'b0),
+        .injectsbiterra(1'b0),
+        .injectdbiterra(1'b0),
+        .sbiterrb(),
+        .dbiterrb()
+    );
+`endif
+
     assign fmt_result_data_valid =
         (retire_state == RETIRE_BUFFER) ? 1'b1 :
         (retire_state == RETIRE_DIRECT) ?
             (!retire_reject && backend_result_valid) : 1'b0;
     assign fmt_result_data =
         (retire_state == RETIRE_BUFFER) ?
-        result_pool[{entry_pool_select[retire_ptr], retire_word_index[7:0]}] :
+        result_pool_read_data :
         backend_result_data;
     assign backend_result_ready = capture_active ? 1'b1 :
         (retire_state == RETIRE_DIRECT) ?
@@ -313,32 +405,46 @@ module dma_task_queue #(
     assign fmt_finish_first_error_job_id = first_error_job_id;
     assign fmt_finish_detail = stored_end_detail;
 
-    wire [63:0] timeout_hit;
+    wire [SCOREBOARD_DEPTH-1:0] timeout_hit;
     genvar timeout_index;
     generate
-        for (timeout_index = 0; timeout_index < 64;
+        for (timeout_index = 0; timeout_index < SCOREBOARD_DEPTH;
              timeout_index = timeout_index + 1) begin : g_timeout_hit
             assign timeout_hit[timeout_index] =
                 entry_valid[timeout_index] && entry_running[timeout_index] &&
                 !entry_complete[timeout_index] &&
-                (entry_compute_cycles[timeout_index] + 64'd1 >=
-                 ((entry_timeout_cycles[timeout_index] == 0) ?
-                  DEFAULT_TIMEOUT_CYCLES :
-                  entry_timeout_cycles[timeout_index]));
+                ((((entry_timeout_cycles[timeout_index] == 0) ?
+                   DEFAULT_TIMEOUT_CYCLES :
+                   entry_timeout_cycles[timeout_index]) == 0) ||
+                 (entry_compute_cycles[timeout_index] >=
+                  (((entry_timeout_cycles[timeout_index] == 0) ?
+                    DEFAULT_TIMEOUT_CYCLES :
+                    entry_timeout_cycles[timeout_index]) - 32'd1)));
         end
     endgenerate
     wire timeout_fire = timeout_request && !done_accept && !capture_active;
     wire recovery_fire = timeout_fire || protocol_abort_fire;
+
+`ifndef SYNTHESIS
+    always @(posedge clk) begin
+        if (result_pool_write_enable)
+            result_pool[result_pool_write_addr] <= backend_result_data;
+        if (result_pool_read_enable)
+            result_pool_read_data <= result_pool[result_pool_read_addr];
+    end
+`endif
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             batch_state <= BATCH_IDLE;
             ingress_state <= INGRESS_IDLE;
             retire_state <= RETIRE_HEADER;
-            allocate_ptr <= 6'd0;
-            retire_ptr <= 6'd0;
+            allocate_ptr <= 5'd0;
+            retire_ptr <= 5'd0;
+            ingress_slot <= 5'd0;
             occupancy <= 7'd0;
             ingress_sequence <= 6'd0;
+            next_sequence <= 6'd0;
             ingress_large_full <= 1'b0;
             direct_exclusive <= 1'b0;
             abort_guard <= 1'b0;
@@ -350,8 +456,8 @@ module dma_task_queue #(
             first_error_job_id <= 32'hFFFFFFFF;
             pool_valid <= 0;
             capture_active <= 1'b0;
-            capture_sequence <= 6'd0;
-            capture_pool_select <= 6'd0;
+            capture_slot <= 5'd0;
+            capture_pool_select <= 5'd0;
             capture_word_index <= 9'd0;
             capture_word_count <= 32'd0;
             retire_word_index <= 32'd0;
@@ -359,28 +465,10 @@ module dma_task_queue #(
             backend_abort <= 1'b0;
             legacy_reject <= 1'b0;
             dma_active <= 1'b0;
-            for (state_index = 0; state_index < 64;
-                 state_index = state_index + 1) begin
-                entry_valid[state_index] <= 1'b0;
-                entry_dispatched[state_index] <= 1'b0;
-                entry_running[state_index] <= 1'b0;
-                entry_complete[state_index] <= 1'b0;
-                entry_has_buffer[state_index] <= 1'b0;
-                entry_direct[state_index] <= 1'b0;
-                entry_sequence[state_index] <= state_index[5:0];
-                entry_job_id[state_index] <= 32'd0;
-                entry_task_id[state_index] <= 8'd0;
-                entry_flags[state_index] <= 32'd0;
-                entry_item_count[state_index] <= 32'd0;
-                entry_user_tag[state_index] <= 32'd0;
-                entry_timeout_cycles[state_index] <= 32'd0;
-                entry_result_capacity[state_index] <= 32'd0;
-                entry_direct_words[state_index] <= 32'd0;
-                entry_result_status[state_index] <= 24'd0;
-                entry_result_words[state_index] <= 32'd0;
-                entry_result_detail[state_index] <= 32'd0;
-                entry_compute_cycles[state_index] <= 64'd0;
-                entry_pool_select[state_index] <= 6'd0;
+            for (sequence_index = 0; sequence_index < 64;
+                 sequence_index = sequence_index + 1) begin
+                sequence_slot[sequence_index] <= 5'd0;
+                sequence_live[sequence_index] <= 1'b0;
             end
         end else begin
             backend_abort <= 1'b0;
@@ -390,12 +478,12 @@ module dma_task_queue #(
                 !backend_result_valid)
                 abort_guard <= 1'b0;
 
-            for (state_index = 0; state_index < 64;
+            for (state_index = 0; state_index < SCOREBOARD_DEPTH;
                  state_index = state_index + 1) begin
                 if (entry_valid[state_index] && entry_running[state_index] &&
                     !entry_complete[state_index])
                     entry_compute_cycles[state_index] <=
-                        entry_compute_cycles[state_index] + 64'd1;
+                        entry_compute_cycles[state_index] + 32'd1;
             end
 
             case ({allocate_fire, retire_fire})
@@ -408,8 +496,10 @@ module dma_task_queue #(
                 batch_state <= BATCH_ACTIVE;
                 ingress_state <= INGRESS_IDLE;
                 retire_state <= RETIRE_HEADER;
-                allocate_ptr <= 6'd0;
-                retire_ptr <= 6'd0;
+                allocate_ptr <= 5'd0;
+                retire_ptr <= 5'd0;
+                ingress_slot <= 5'd0;
+                next_sequence <= 6'd0;
                 occupancy <= 7'd0;
                 end_pending <= 1'b0;
                 completed_count <= 32'd0;
@@ -422,7 +512,7 @@ module dma_task_queue #(
                 retire_word_index <= 32'd0;
                 retire_reject <= 1'b0;
                 dma_active <= 1'b1;
-                for (state_index = 0; state_index < 64;
+                for (state_index = 0; state_index < SCOREBOARD_DEPTH;
                      state_index = state_index + 1) begin
                     entry_valid[state_index] <= 1'b0;
                     entry_complete[state_index] <= 1'b0;
@@ -431,6 +521,9 @@ module dma_task_queue #(
                     entry_dispatched[state_index] <= 1'b0;
                     entry_running[state_index] <= 1'b0;
                 end
+                for (sequence_index = 0; sequence_index < 64;
+                     sequence_index = sequence_index + 1)
+                    sequence_live[sequence_index] <= 1'b0;
             end else begin
                 case (batch_state)
                     BATCH_ACTIVE: begin
@@ -469,42 +562,35 @@ module dma_task_queue #(
                     (in_task_status != `MOL_DMA_STATUS_OK);
                 entry_has_buffer[allocate_ptr] <= 1'b0;
                 entry_direct[allocate_ptr] <= 1'b0;
-                entry_sequence[allocate_ptr] <= allocate_ptr;
-                entry_job_id[allocate_ptr] <= in_task_job_id;
-                entry_task_id[allocate_ptr] <= in_task_id;
-                entry_flags[allocate_ptr] <= in_task_flags;
-                entry_item_count[allocate_ptr] <= in_task_item_count;
-                entry_user_tag[allocate_ptr] <= in_task_user_tag;
                 entry_timeout_cycles[allocate_ptr] <= in_task_timeout_cycles;
-                entry_result_capacity[allocate_ptr] <=
-                    in_task_result_capacity_words;
-                entry_direct_words[allocate_ptr] <= task_direct_words;
-                entry_result_status[allocate_ptr] <= {16'd0, in_task_status};
-                entry_result_words[allocate_ptr] <= 32'd0;
-                entry_result_detail[allocate_ptr] <= in_task_detail;
-                entry_compute_cycles[allocate_ptr] <= 64'd0;
-                entry_pool_select[allocate_ptr] <= 6'd0;
-                ingress_sequence <= allocate_ptr;
+                entry_compute_cycles[allocate_ptr] <= 32'd0;
+                entry_pool_select[allocate_ptr] <= 5'd0;
+                ingress_slot <= allocate_ptr;
+                ingress_sequence <= next_sequence;
+                next_sequence <= next_sequence + 6'd1;
+                sequence_slot[next_sequence] <= allocate_ptr;
+                sequence_live[next_sequence] <= 1'b1;
                 ingress_large_full <= task_is_legal_direct;
-                allocate_ptr <= allocate_ptr + 6'd1;
+                allocate_ptr <= (allocate_ptr == SCOREBOARD_DEPTH - 1) ?
+                                5'd0 : allocate_ptr + 5'd1;
                 if (in_task_status == `MOL_DMA_STATUS_OK)
                     ingress_state <= INGRESS_DISPATCH;
             end
 
             if (backend_task_fire) begin
-                entry_dispatched[ingress_sequence] <= 1'b1;
+                entry_dispatched[ingress_slot] <= 1'b1;
                 if (ingress_large_full) begin
-                    entry_direct[ingress_sequence] <= 1'b1;
+                    entry_direct[ingress_slot] <= 1'b1;
                     direct_exclusive <= 1'b1;
                 end else begin
-                    pool_valid[ingress_sequence] <= 1'b1;
-                    entry_has_buffer[ingress_sequence] <= 1'b1;
-                    entry_pool_select[ingress_sequence] <= ingress_sequence;
+                    pool_valid[ingress_slot] <= 1'b1;
+                    entry_has_buffer[ingress_slot] <= 1'b1;
+                    entry_pool_select[ingress_slot] <= ingress_slot;
                 end
                 ingress_state <= INGRESS_PAYLOAD;
             end
             if (backend_payload_last_fire) begin
-                entry_running[ingress_sequence] <= 1'b1;
+                entry_running[ingress_slot] <= 1'b1;
                 ingress_state <= INGRESS_IDLE;
             end
             if ((ingress_state == INGRESS_DRAIN) && in_payload_valid &&
@@ -512,44 +598,36 @@ module dma_task_queue #(
                 ingress_state <= INGRESS_IDLE;
 
             if (done_accept) begin
-                entry_running[backend_done_sequence] <= 1'b0;
+                entry_running[done_entry_slot] <= 1'b0;
                 if (done_shape_valid) begin
-                    entry_result_status[backend_done_sequence] <=
-                        backend_done_status;
-                    entry_result_words[backend_done_sequence] <=
-                        backend_done_result_words;
-                    entry_result_detail[backend_done_sequence] <=
-                        backend_done_detail;
                     if (done_is_zero) begin
-                        if (entry_has_buffer[backend_done_sequence])
+                        if (entry_has_buffer[done_entry_slot])
                             pool_valid[
-                                entry_pool_select[backend_done_sequence]] <=
+                                entry_pool_select[done_entry_slot]] <=
                                 1'b0;
-                        entry_has_buffer[backend_done_sequence] <= 1'b0;
-                        if (entry_direct[backend_done_sequence]) begin
-                            entry_direct[backend_done_sequence] <= 1'b0;
+                        entry_has_buffer[done_entry_slot] <= 1'b0;
+                        if (entry_direct[done_entry_slot]) begin
+                            entry_direct[done_entry_slot] <= 1'b0;
                             direct_exclusive <= 1'b0;
                         end
-                        entry_complete[backend_done_sequence] <= 1'b1;
+                        entry_complete[done_entry_slot] <= 1'b1;
                     end else if (done_is_buffered) begin
                         capture_active <= 1'b1;
-                        capture_sequence <= backend_done_sequence;
+                        capture_slot <= done_entry_slot;
                         capture_pool_select <=
-                            entry_pool_select[backend_done_sequence];
+                            entry_pool_select[done_entry_slot];
                         capture_word_index <= 9'd0;
                         capture_word_count <= backend_done_result_words;
                     end else begin
-                        entry_complete[backend_done_sequence] <= 1'b1;
+                        entry_complete[done_entry_slot] <= 1'b1;
                     end
                 end
             end
 
             if (capture_active && backend_result_valid &&
                 backend_result_ready) begin
-                result_pool[{capture_pool_select, capture_word_index[7:0]}] <=
-                    backend_result_data;
                 if (capture_word_index + 9'd1 == capture_word_count) begin
-                    entry_complete[capture_sequence] <= 1'b1;
+                    entry_complete[capture_slot] <= 1'b1;
                     capture_active <= 1'b0;
                     capture_word_index <= 9'd0;
                 end else begin
@@ -577,6 +655,7 @@ module dma_task_queue #(
                     pool_valid[entry_pool_select[retire_ptr]] <= 1'b0;
                 if (entry_direct[retire_ptr])
                     direct_exclusive <= 1'b0;
+                sequence_live[entry_sequence[retire_ptr]] <= 1'b0;
                 entry_valid[retire_ptr] <= 1'b0;
                 entry_dispatched[retire_ptr] <= 1'b0;
                 entry_running[retire_ptr] <= 1'b0;
@@ -589,7 +668,8 @@ module dma_task_queue #(
                     if (error_count == 0)
                         first_error_job_id <= entry_job_id[retire_ptr];
                 end
-                retire_ptr <= retire_ptr + 6'd1;
+                retire_ptr <= (retire_ptr == SCOREBOARD_DEPTH - 1) ?
+                              5'd0 : retire_ptr + 5'd1;
                 retire_state <= RETIRE_HEADER;
                 retire_word_index <= 32'd0;
                 retire_reject <= 1'b0;
@@ -605,34 +685,77 @@ module dma_task_queue #(
                 else if ((ingress_state == INGRESS_DISPATCH) &&
                          backend_task_fire)
                     ingress_state <= INGRESS_DRAIN;
-                for (state_index = 0; state_index < 64;
+                for (state_index = 0; state_index < SCOREBOARD_DEPTH;
                      state_index = state_index + 1) begin
                     if (entry_valid[state_index] &&
                         (entry_dispatched[state_index] ||
                          (protocol_abort_fire && backend_task_fire &&
-                          (state_index == ingress_sequence))) &&
+                          (state_index == ingress_slot))) &&
                         !entry_complete[state_index]) begin
                         if (protocol_abort_fire && backend_task_fire &&
-                            (state_index == ingress_sequence))
-                            pool_valid[ingress_sequence] <= 1'b0;
+                            (state_index == ingress_slot))
+                            pool_valid[ingress_slot] <= 1'b0;
                         else if (entry_has_buffer[state_index])
                             pool_valid[entry_pool_select[state_index]] <= 1'b0;
                         entry_running[state_index] <= 1'b0;
                         entry_complete[state_index] <= 1'b1;
                         entry_has_buffer[state_index] <= 1'b0;
                         entry_direct[state_index] <= 1'b0;
-                        entry_result_status[state_index] <=
-                            protocol_abort_fire ?
-                            `MOL_DMA_STATUS_INTERNAL_ERROR :
-                            `MOL_DMA_STATUS_TASK_TIMEOUT;
-                        entry_result_words[state_index] <= 32'd0;
-                        entry_result_detail[state_index] <=
-                            protocol_abort_fire ? backend_done_result_words :
-                            entry_compute_cycles[state_index][31:0] + 32'd1;
                     end
                 end
             end
         end
+    end
+
+    // Immutable descriptors are written exactly once when their slot is
+    // allocated.  Keeping them out of the asynchronous-reset control process
+    // permits the existing distributed-RAM directives to take effect.
+    always @(posedge clk) begin
+        if (allocate_fire) begin
+            entry_sequence[allocate_ptr] <= next_sequence;
+            entry_job_id[allocate_ptr] <= in_task_job_id;
+            entry_task_id[allocate_ptr] <= in_task_id;
+            entry_flags[allocate_ptr] <= in_task_flags;
+            entry_item_count[allocate_ptr] <= in_task_item_count;
+            entry_user_tag[allocate_ptr] <= in_task_user_tag;
+            entry_result_capacity[allocate_ptr] <=
+                in_task_result_capacity_words;
+            entry_direct_words[allocate_ptr] <= task_direct_words;
+        end
+    end
+
+    // Completion metadata is meaningful only while entry_valid/complete is
+    // asserted.  Keeping it out of the reset-controlled process lets Vivado
+    // infer the existing asynchronous-read distributed RAMs without changing
+    // the completion, timeout, or retirement ordering.
+    always @(posedge clk) begin
+        if (allocate_fire) begin
+            entry_result_status[allocate_ptr] <= {16'd0, in_task_status};
+            entry_result_words[allocate_ptr] <= 32'd0;
+            entry_result_detail[allocate_ptr] <= in_task_detail;
+        end
+        if (done_accept && done_shape_valid) begin
+            entry_result_status[done_entry_slot] <= backend_done_status;
+            entry_result_words[done_entry_slot] <= backend_done_result_words;
+            entry_result_detail[done_entry_slot] <= backend_done_detail;
+        end
+        if (recovery_fire)
+            for (completion_index = 0; completion_index < SCOREBOARD_DEPTH;
+                 completion_index = completion_index + 1)
+                if (entry_valid[completion_index] &&
+                    (entry_dispatched[completion_index] ||
+                     (protocol_abort_fire && backend_task_fire &&
+                      (completion_index == ingress_slot))) &&
+                    !entry_complete[completion_index]) begin
+                    entry_result_status[completion_index] <=
+                        protocol_abort_fire ?
+                        `MOL_DMA_STATUS_INTERNAL_ERROR :
+                        `MOL_DMA_STATUS_TASK_TIMEOUT;
+                    entry_result_words[completion_index] <= 32'd0;
+                    entry_result_detail[completion_index] <=
+                        protocol_abort_fire ? backend_done_result_words :
+                        entry_compute_cycles[completion_index] + 32'd1;
+                end
     end
 
 `ifndef SYNTHESIS
@@ -649,15 +772,15 @@ module dma_task_queue #(
                            entry_sequence[retire_ptr], expected_retire_sequence);
                 expected_retire_sequence <= expected_retire_sequence + 6'd1;
             end
-            if (occupancy > 7'd64)
-                $fatal(1, "scoreboard occupancy exceeded 64: %0d", occupancy);
+            if (occupancy > SCOREBOARD_DEPTH)
+                $fatal(1, "scoreboard occupancy exceeded %0d: %0d", SCOREBOARD_DEPTH, occupancy);
             if (batch_accept && in_batch_task_count > 32'd64)
                 $fatal(1, "scoreboard batch count exceeds 6-bit ownership: %0d",
                        in_batch_task_count);
             if (allocate_fire && entry_valid[allocate_ptr])
                 $fatal(1, "scoreboard overwrote live sequence %0d", allocate_ptr);
             if (backend_task_valid && backend_task_ready &&
-                !ingress_large_full && pool_valid[ingress_sequence])
+                !ingress_large_full && pool_valid[ingress_slot])
                 $fatal(1, "result slot reused before sequence %0d retired",
                        ingress_sequence);
             if (backend_done_valid && !done_metadata_known &&
@@ -666,16 +789,16 @@ module dma_task_queue #(
             if (abort_guard && backend_done_ready)
                 $fatal(1, "aborted backend completion reacquired ownership");
             if (allocate_fire)
-                for (assertion_index = 0; assertion_index < 64;
+                for (assertion_index = 0; assertion_index < SCOREBOARD_DEPTH;
                      assertion_index = assertion_index + 1)
                     if (entry_valid[assertion_index] &&
-                        (entry_sequence[assertion_index] == allocate_ptr))
-                        $fatal(1, "duplicate live sequence %0d", allocate_ptr);
-            for (assertion_index = 0; assertion_index < 64;
+                        (entry_sequence[assertion_index] == next_sequence))
+                        $fatal(1, "duplicate live sequence %0d", next_sequence);
+            for (assertion_index = 0; assertion_index < SCOREBOARD_DEPTH;
                  assertion_index = assertion_index + 1) begin
                 if (entry_has_buffer[assertion_index] &&
                     entry_pool_select[assertion_index] !=
-                    entry_sequence[assertion_index])
+                    assertion_index[4:0])
                     $fatal(1, "sequence %0d owns result slot %0d",
                            entry_sequence[assertion_index],
                            entry_pool_select[assertion_index]);

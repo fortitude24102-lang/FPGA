@@ -149,7 +149,7 @@ module tb_dma_task_scoreboard;
     integer active_result_ordinal = -1;
     integer finish_count = 0;
     reg first_retired = 1'b0;
-    reg task65_accepted = 1'b0;
+    reg task17_accepted = 1'b0;
     integer cycle_watchdog = 0;
 
     always @(posedge clk or negedge resetn) begin
@@ -177,11 +177,11 @@ module tb_dma_task_scoreboard;
             active_result_ordinal <= -1;
             finish_count <= 0;
             first_retired <= 1'b0;
-            task65_accepted <= 1'b0;
+            task17_accepted <= 1'b0;
         end else begin
             if ((phase <= 1) && backend_task_valid && backend_task_ready) begin
                 if ((phase == 0 &&
-                     (backend_task_sequence !== dispatch_count[5:0] ||
+                     (backend_task_sequence !== (dispatch_count & 6'h3f) ||
                       backend_task_id !== (dispatch_count & 3))) ||
                     (phase != 0 &&
                      (backend_task_sequence !== 0 ||
@@ -192,10 +192,10 @@ module tb_dma_task_scoreboard;
             end
 
             if ((phase == 0) && in_task_valid && in_task_ready &&
-                in_task_job_id == 32'h51000040) begin
+                in_task_job_id == 32'h51000010) begin
                 if (!first_retired)
-                    $fatal(1, "65th task was accepted before an entry retired");
-                task65_accepted <= 1'b1;
+                    $fatal(1, "17th task was accepted before an entry retired");
+                task17_accepted <= 1'b1;
             end
 
             if ((phase <= 1) && fmt_result_valid && fmt_result_ready) begin
@@ -208,8 +208,11 @@ module tb_dma_task_scoreboard;
                         fmt_result_status !== (result_headers == 7 ? 24'h000004 : 24'd0) ||
                         fmt_result_detail !==
                             (result_headers == 7 ? 32'hBADD0007 : 32'd0))
-                        $fatal(1, "ordered result metadata mismatch at ordinal %0d",
-                               result_headers);
+                        $fatal(1, "ordered result metadata mismatch at ordinal %0d: job=%h id=%h words=%h tag=%h status=%h detail=%h",
+                               result_headers, fmt_result_job_id,
+                               fmt_result_task_id, fmt_result_words,
+                               fmt_result_user_tag, fmt_result_status,
+                               fmt_result_detail);
                     active_result_ordinal <= result_headers;
                     result_data_index <= 0;
                     result_headers <= result_headers + 1;
@@ -244,7 +247,7 @@ module tb_dma_task_scoreboard;
 
             if ((phase <= 1) && fmt_finish_valid) begin
                 if (phase == 0) begin
-                    if (fmt_finish_completed_count !== 64 ||
+                    if (fmt_finish_completed_count !== 70 ||
                         fmt_finish_error_count !== 1 ||
                         fmt_finish_first_error_job_id !== 32'h51000007)
                         $fatal(1, "scoreboard finish counters are wrong");
@@ -1062,24 +1065,24 @@ module tb_dma_task_scoreboard;
         end
 
         start_batch(32'h5C0B0040, 64, 2048);
-        for (i = 0; i < 64; i = i + 1)
+        for (i = 0; i < 16; i = i + 1)
             submit_task(i, 0, expected_words(i));
-        if (dispatch_count != 64)
-            $fatal(1, "only %0d of 64 tasks dispatched before completion",
+        if (dispatch_count != 16)
+            $fatal(1, "only %0d of 16 tasks dispatched before completion",
                    dispatch_count);
-        if (dut.pool_valid !== {64{1'b1}})
-            $fatal(1, "64 dispatched small tasks did not each reserve a slot");
+        if (dut.pool_valid[15:0] !== {16{1'b1}})
+            $fatal(1, "16 dispatched small tasks did not each reserve a slot");
 
-        in_task_job_id = 32'h51000040;
+        in_task_job_id = 32'h51000010;
         in_task_id = 0;
         in_task_flags = 0;
         in_task_result_capacity_words = 1;
-        in_task_user_tag = 32'h51000040 ^ 32'hA5000000;
+        in_task_user_tag = 32'h51000010 ^ 32'hA5000000;
         in_task_valid = 1'b1;
         repeat (5) begin
             @(negedge clk);
             if (in_task_ready)
-                $fatal(1, "65th task was not backpressured at occupancy 64");
+                $fatal(1, "17th task was not backpressured at occupancy 16");
         end
 
         send_completion(6'd1, 0, expected_words(1), 0, 1);
@@ -1108,10 +1111,12 @@ module tb_dma_task_scoreboard;
         end
         fmt_result_data_ready = 1'b1;
 
-        while (in_task_ready !== 1'b1) @(negedge clk);
+        while (!task17_accepted) @(negedge clk);
+        if (!task17_accepted)
+            $fatal(1, "17th task did not reuse the retired slot");
         in_task_valid = 1'b0;
 
-        for (i = 2; i < 64; i = i + 2) begin
+        for (i = 2; i < 16; i = i + 2) begin
             send_completion(i + 1,
                             (i + 1 == 7) ? 24'h000004 : 24'd0,
                             expected_words(i + 1),
@@ -1119,15 +1124,31 @@ module tb_dma_task_scoreboard;
                             i + 1);
             send_completion(i, 0, expected_words(i), 0, i);
         end
+        // The 17th descriptor reuses physical slot 0 after ordinal 0 retires.
+        in_payload_data = 32'hC0000010;
+        in_payload_last = 1'b1;
+        in_payload_valid = 1'b1;
+        while (!in_payload_ready) @(negedge clk);
+        @(negedge clk);
+        in_payload_valid = 1'b0;
+        in_payload_last = 1'b0;
+        send_completion(6'd16, 0, expected_words(16), 0, 16);
+
+        while (result_headers != 17) @(negedge clk);
+        for (i = 17; i < 70; i = i + 1) begin
+            submit_task(i, 0, expected_words(i));
+            send_completion(i & 6'h3f, 0, expected_words(i), 0, i);
+            while (result_headers != i + 1) @(negedge clk);
+        end
         end_batch();
 
         prior_finish = finish_count;
         while (finish_count == prior_finish) @(negedge clk);
         while (!in_batch_ready) @(negedge clk);
-        if (result_headers != 64 || !first_retired)
-            $fatal(1, "ordered retirement produced %0d of 64 headers",
+        if (result_headers != 70 || !first_retired)
+            $fatal(1, "ordered retirement produced %0d of 70 headers",
                    result_headers);
-        $display("PASS 64-entry occupancy, 65th backpressure and ordered retirement");
+        $display("PASS 16-entry occupancy, 17th backpressure, 70 sequence wrap and slot reuse");
 
         phase = 1;
         dispatch_count = 0;

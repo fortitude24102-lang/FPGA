@@ -11,6 +11,14 @@ if {[current_bd_design -quiet] eq ""} {
 
 set failures {}
 
+set build_mode release
+if {[info exists ::env(BUILD_MODE)]} {
+    set build_mode [string tolower $::env(BUILD_MODE)]
+}
+if {$build_mode ni {debug release}} {
+    error "BUILD_MODE must be debug or release (got $build_mode)"
+}
+
 proc check_cell {name} {
     if {[llength [get_bd_cells -quiet $name]] != 1} {
         lappend ::failures "missing cell $name"
@@ -52,21 +60,33 @@ foreach name {
     ps_axi3_lite_bridge_0
     generator_accelerator_0
     dma_ctrl_protocol_converter
+    dma_ctrl_interconnect
     axi_dma_0
     dma_mm2s_dwidth
     dma_s2mm_dwidth
     dma_mem_interconnect
     axis_job_fifo
     axis_result_fifo
+    accelerator_clock_wizard
+    legacy_core_clock_converter
     rst_ps7_0_100M
     rst_ps7_0_125M
+    rst_ps7_0_33M
+    rst_accelerator_core
     dma_irq_concat
 } {
     check_cell $name
 }
 
-if {[llength [get_bd_cells -quiet axi_debug_system_ila]] != 0} {
-    lappend failures "production BD still contains axi_debug_system_ila"
+set ila_cells [get_bd_cells -quiet -hierarchical -filter {VLNV =~ "xilinx.com:ip:ila:*"}]
+if {$build_mode eq "release" && [llength $ila_cells] != 0} {
+    lappend failures "release BD contains ILA: $ila_cells"
+}
+if {$build_mode eq "debug"} {
+    if {[llength $ila_cells] != 1 ||
+        [llength [get_bd_cells -quiet accelerator_debug_ila]] != 1} {
+        lappend failures "debug BD must contain exactly accelerator_debug_ila"
+    }
 }
 
 set ps [get_bd_cells -quiet processing_system7_0]
@@ -77,6 +97,7 @@ if {[llength $ps] == 1} {
         CONFIG.PCW_USE_S_AXI_HP0 1
         CONFIG.PCW_FPGA_FCLK0_ENABLE 1
         CONFIG.PCW_FPGA_FCLK1_ENABLE 1
+        CONFIG.PCW_FPGA_FCLK2_ENABLE 1
     } {
         if {[get_property $property $ps] ne $expected} {
             lappend failures "$property is not $expected"
@@ -86,12 +107,23 @@ if {[llength $ps] == 1} {
     if {![string match "125.*" $fclk1_mhz]} {
         lappend failures "FCLK1 is not configured for 125 MHz (got $fclk1_mhz)"
     }
+    set fclk0_mhz [get_property CONFIG.PCW_FPGA0_PERIPHERAL_FREQMHZ $ps]
+    if {![string match "100.*" $fclk0_mhz]} {
+        lappend failures "FCLK0 is not configured for 100 MHz (got $fclk0_mhz)"
+    }
+    set fclk2_mhz [get_property CONFIG.PCW_FPGA2_PERIPHERAL_FREQMHZ $ps]
+    if {![string match "33.*" $fclk2_mhz]} {
+        lappend failures "FCLK2 is not configured for 33 MHz (got $fclk2_mhz)"
+    }
 }
 
 check_intf_link processing_system7_0/M_AXI_GP0 ps_axi3_lite_bridge_0/S_AXI
-check_intf_link ps_axi3_lite_bridge_0/M_AXI generator_accelerator_0/s_axi
+check_intf_link ps_axi3_lite_bridge_0/M_AXI legacy_core_clock_converter/S_AXI
+check_intf_link legacy_core_clock_converter/M_AXI generator_accelerator_0/s_axi
 check_intf_link processing_system7_0/M_AXI_GP1 dma_ctrl_protocol_converter/S_AXI
-check_intf_link dma_ctrl_protocol_converter/M_AXI axi_dma_0/S_AXI_LITE
+check_intf_link dma_ctrl_protocol_converter/M_AXI dma_ctrl_interconnect/S00_AXI
+check_intf_link dma_ctrl_interconnect/M00_AXI axi_dma_0/S_AXI_LITE
+check_intf_link dma_ctrl_interconnect/M01_AXI accelerator_clock_wizard/s_axi_lite
 check_intf_link axi_dma_0/M_AXIS_MM2S axis_job_fifo/S_AXIS
 check_intf_link axis_job_fifo/M_AXIS generator_accelerator_0/s_axis_job
 check_intf_link generator_accelerator_0/m_axis_result axis_result_fifo/S_AXIS
@@ -107,13 +139,32 @@ foreach pin {
     processing_system7_0/M_AXI_GP1_ACLK
     ps_axi3_lite_bridge_0/aclk
     dma_ctrl_protocol_converter/aclk
+    dma_ctrl_interconnect/ACLK
+    dma_ctrl_interconnect/S00_ACLK
+    dma_ctrl_interconnect/M00_ACLK
+    dma_ctrl_interconnect/M01_ACLK
     axi_dma_0/s_axi_lite_aclk
-    axis_job_fifo/m_axis_aclk
-    axis_result_fifo/s_axis_aclk
-    generator_accelerator_0/s_axi_aclk
+    accelerator_clock_wizard/clk_in1
+    accelerator_clock_wizard/s_axi_aclk
+    legacy_core_clock_converter/s_axi_aclk
 } {
     check_pin_net $pin processing_system7_0/FCLK_CLK0
 }
+
+check_pin_net rst_ps7_0_33M/slowest_sync_clk processing_system7_0/FCLK_CLK2
+check_pin_net rst_ps7_0_33M/ext_reset_in processing_system7_0/FCLK_RESET2_N
+
+foreach pin {
+    accelerator_clock_wizard/clk_out1
+    legacy_core_clock_converter/m_axi_aclk
+    generator_accelerator_0/s_axi_aclk
+    axis_job_fifo/m_axis_aclk
+    axis_result_fifo/s_axis_aclk
+    rst_accelerator_core/slowest_sync_clk
+} {
+    check_pin_net $pin accelerator_clock_wizard/clk_out1
+}
+check_pin_net rst_accelerator_core/dcm_locked accelerator_clock_wizard/locked
 
 foreach pin {
     processing_system7_0/S_AXI_HP0_ACLK
@@ -143,11 +194,22 @@ if {[llength $rst125_cell] == 1 &&
 }
 foreach pin {
     dma_ctrl_protocol_converter/aresetn
-    generator_accelerator_0/s_axi_aresetn
+    dma_ctrl_interconnect/ARESETN
+    dma_ctrl_interconnect/S00_ARESETN
+    dma_ctrl_interconnect/M00_ARESETN
+    dma_ctrl_interconnect/M01_ARESETN
     axi_dma_0/axi_resetn
-    axis_result_fifo/s_axis_aresetn
+    accelerator_clock_wizard/s_axi_aresetn
+    legacy_core_clock_converter/s_axi_aresetn
 } {
     check_pin_net $pin rst_ps7_0_100M/peripheral_aresetn
+}
+foreach pin {
+    legacy_core_clock_converter/m_axi_aresetn
+    generator_accelerator_0/s_axi_aresetn
+    axis_result_fifo/s_axis_aresetn
+} {
+    check_pin_net $pin rst_accelerator_core/peripheral_aresetn
 }
 foreach pin {
     axis_job_fifo/s_axis_aresetn
@@ -219,6 +281,60 @@ if {[llength $dma_segment] != 1} {
     lappend failures "missing AXI DMA register address segment"
 } elseif {[get_property OFFSET $dma_segment] ne "0x80400000"} {
     lappend failures "AXI DMA register base is not 0x80400000"
+}
+
+set wizard_segment [get_bd_addr_segs -quiet \
+    processing_system7_0/Data/SEG_accelerator_clock_wizard_Reg]
+if {[llength $wizard_segment] != 1} {
+    lappend failures "missing Clocking Wizard register address segment"
+} elseif {[get_property OFFSET $wizard_segment] ne "0x80410000"} {
+    lappend failures "Clocking Wizard register base is not 0x80410000"
+}
+
+set wizard [get_bd_cells -quiet accelerator_clock_wizard]
+if {[llength $wizard] == 1} {
+    foreach {property expected} {
+        CONFIG.USE_DYN_RECONFIG true
+        CONFIG.INTERFACE_SELECTION Enable_AXI
+        CONFIG.PRIM_IN_FREQ 100.000
+        CONFIG.CLKOUT1_REQUESTED_OUT_FREQ 100.000
+    } {
+        if {[get_property $property $wizard] ne $expected} {
+            lappend failures "$property is not $expected"
+        }
+    }
+}
+
+if {$build_mode eq "debug"} {
+    set ila [get_bd_cells -quiet accelerator_debug_ila]
+    if {[llength $ila] == 1} {
+        foreach {property expected} {
+            CONFIG.C_MONITOR_TYPE Native
+            CONFIG.C_ENABLE_ILA_AXI_MON false
+            CONFIG.C_NUM_OF_PROBES 6
+            CONFIG.C_PROBE0_WIDTH 7
+            CONFIG.C_PROBE1_WIDTH 3
+            CONFIG.C_PROBE2_WIDTH 3
+            CONFIG.C_PROBE3_WIDTH 3
+            CONFIG.C_PROBE4_WIDTH 6
+            CONFIG.C_PROBE5_WIDTH 2
+        } {
+            if {[get_property $property $ila] ne $expected} {
+                lappend failures "$property is not $expected"
+            }
+        }
+    }
+    check_pin_net accelerator_debug_ila/clk accelerator_clock_wizard/clk_out1
+    foreach {probe source} {
+        probe0 generator_accelerator_0/debug_queue_occupancy
+        probe1 generator_accelerator_0/engine_start
+        probe2 generator_accelerator_0/engine_busy
+        probe3 generator_accelerator_0/engine_done
+        probe4 generator_accelerator_0/debug_active_sequence
+        probe5 clock_profile_const/dout
+    } {
+        check_pin_net accelerator_debug_ila/$probe $source
+    }
 }
 
 set legacy_segment [get_bd_addr_segs -quiet \

@@ -92,7 +92,9 @@ module generator_accelerator_top #(
     output wire                            m_axis_result_tlast,
     output wire [2:0]                      engine_busy,
     output wire [2:0]                      engine_start,
-    output wire [2:0]                      engine_done
+    output wire [2:0]                      engine_done,
+    output wire [6:0]                      debug_queue_occupancy,
+    output wire [5:0]                      debug_active_sequence
 );
 
     localparam integer GNN_FEATURE_BITS =
@@ -746,7 +748,9 @@ module generator_accelerator_top #(
         .backend_result_data(backend_result_data), .backend_abort(backend_abort),
         .legacy_active(scheduler_state != ST_IDLE),
         .legacy_start(command_start), .legacy_reject(dma_legacy_reject),
-        .dma_active(dma_active)
+        .dma_active(dma_active),
+        .debug_queue_occupancy(debug_queue_occupancy),
+        .debug_active_sequence(debug_active_sequence)
     );
 
     dma_result_formatter u_dma_formatter (

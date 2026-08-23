@@ -1108,7 +1108,15 @@ module dma_accelerator_lane_controller #(
     reg [31:0] result_words_reg;
     reg [31:0] result_index;
     reg [31:0] result_data_reg;
+    reg [31:0] result_prepared_data;
     reg result_valid_reg;
+    reg result_prepare_pending;
+    reg result_data_pending;
+    reg [4:0] result_prepared_index;
+    reg [5:0] result_prepared_small_addr;
+    reg [1:0] result_prepared_small_bank;
+    reg [3:0] result_prepared_item;
+    reg [2:0] result_prepared_slot;
     reg [1:0] gnn_read_wait;
     reg [31:0] tanimoto_result;
     reg [2:0] pipeline_done_mask;
@@ -1237,9 +1245,9 @@ module dma_accelerator_lane_controller #(
                       small_linear_index[1:0];
     wire [127:0] small_bank_read_bus;
     wire [31:0] small_result_read =
-        (small_read_bank == 0) ? small_bank_read_bus[31:0] :
-        (small_read_bank == 1) ? small_bank_read_bus[63:32] :
-        (small_read_bank == 2) ? small_bank_read_bus[95:64] :
+        (result_prepared_small_bank == 0) ? small_bank_read_bus[31:0] :
+        (result_prepared_small_bank == 1) ? small_bank_read_bus[63:32] :
+        (result_prepared_small_bank == 2) ? small_bank_read_bus[95:64] :
                                  small_bank_read_bus[127:96];
 
     genvar result_bank;
@@ -1261,7 +1269,7 @@ module dma_accelerator_lane_controller #(
                  admet_predictions[result_bank*DATA_WIDTH +: DATA_WIDTH]};
             dma_result_bank bank (
                 .clk(clk), .we(bank_we), .waddr(bank_waddr),
-                .wdata(bank_wdata), .raddr(small_read_addr),
+                .wdata(bank_wdata), .raddr(result_prepared_small_addr),
                 .rdata(small_bank_read_bus[result_bank*32 +: 32])
             );
         end
@@ -1278,7 +1286,15 @@ module dma_accelerator_lane_controller #(
             result_words_reg <= 0;
             result_index <= 0;
             result_data_reg <= 0;
+            result_prepared_data <= 0;
             result_valid_reg <= 0;
+            result_prepare_pending <= 1'b0;
+            result_data_pending <= 1'b0;
+            result_prepared_index <= 0;
+            result_prepared_small_addr <= 0;
+            result_prepared_small_bank <= 0;
+            result_prepared_item <= 0;
+            result_prepared_slot <= 0;
             gnn_read_wait <= 0;
             tanimoto_result <= 0;
             pipeline_done_mask <= 3'b000;
@@ -1337,7 +1353,15 @@ module dma_accelerator_lane_controller #(
                 result_words_reg <= 0;
                 result_index <= 0;
                 result_data_reg <= 0;
+                result_prepared_data <= 0;
                 result_valid_reg <= 1'b0;
+                result_prepare_pending <= 1'b0;
+                result_data_pending <= 1'b0;
+                result_prepared_index <= 0;
+                result_prepared_small_addr <= 0;
+                result_prepared_small_bank <= 0;
+                result_prepared_item <= 0;
+                result_prepared_slot <= 0;
                 gnn_read_wait <= 0;
                 pipeline_done_mask <= 3'b000;
                 input_bank_occupied <= 2'b00;
@@ -1435,6 +1459,8 @@ module dma_accelerator_lane_controller #(
                 case (state)
                     ST_IDLE: begin
                         result_valid_reg <= 1'b0;
+                        result_prepare_pending <= 1'b0;
+                        result_data_pending <= 1'b0;
                         if (task_valid && task_ready) begin
                             active_task <= task_id;
                             active_flags <= task_flags;
@@ -1665,13 +1691,46 @@ module dma_accelerator_lane_controller #(
                     ST_DONE: if (done_valid && done_ready) begin
                         result_index <= 0;
                         result_valid_reg <= 1'b0;
+                        result_prepare_pending <= 1'b0;
+                        result_data_pending <= 1'b0;
                         state <= (result_words_reg == 0) ? ST_IDLE : ST_RESULT;
                     end
 
                     ST_RESULT: begin
                         if (!result_valid_reg) begin
-                            if (is_gnn_result_word(active_task, active_flags,
-                                                   result_index)) begin
+                            // Compact result words select a lane/result-bank from
+                            // result_index.  Register that selection before valid
+                            // so all three independent lanes avoid the long
+                            // index-to-data cone; full GNN reads already have their
+                            // own synchronous-read wait state below.
+                            if (result_data_pending) begin
+                                result_data_reg <= result_prepared_data;
+                                result_valid_reg <= 1'b1;
+                                result_data_pending <= 1'b0;
+                            end else if (result_prepare_pending) begin
+                                if (active_task == `MOL_DMA_TASK_GNN)
+                                    result_prepared_data <=
+                                        gnn_item_result[result_prepared_index];
+                                else if (active_task == `MOL_DMA_TASK_PIPELINE &&
+                                         full_gnn && result_prepared_index == 0)
+                                    result_prepared_data <= tanimoto_item_result[0];
+                                else if (active_task == `MOL_DMA_TASK_PIPELINE &&
+                                         return_intermediate &&
+                                         result_prepared_slot == 0)
+                                    result_prepared_data <= tanimoto_item_result[
+                                        result_prepared_item];
+                                else if (active_task == `MOL_DMA_TASK_PIPELINE &&
+                                         return_intermediate &&
+                                         result_prepared_slot == 1)
+                                    result_prepared_data <= gnn_item_result[
+                                        result_prepared_item];
+                                else
+                                    result_prepared_data <= small_result_read;
+                                result_prepare_pending <= 1'b0;
+                                result_data_pending <= 1'b1;
+                            end else if (is_gnn_result_word(active_task,
+                                                            active_flags,
+                                                            result_index)) begin
                                 gnn_output_addr_reg <=
                                     gnn_result_address(active_task, result_index);
                                 gnn_output_re_reg <= 1'b1;
@@ -1679,27 +1738,21 @@ module dma_accelerator_lane_controller #(
                                 state <= ST_GNN_READ_WAIT;
                             end else begin
                                 if (active_task == `MOL_DMA_TASK_TANIMOTO &&
-                                    !shared_mode)
-                                    result_data_reg <= tanimoto_result;
-                                else if (active_task == `MOL_DMA_TASK_GNN)
-                                    result_data_reg <=
-                                        gnn_item_result[result_index[4:0]];
-                                else if (active_task == `MOL_DMA_TASK_PIPELINE &&
-                                         full_gnn && result_index == 0)
-                                    result_data_reg <= tanimoto_item_result[0];
-                                else if (active_task == `MOL_DMA_TASK_PIPELINE &&
-                                         return_intermediate &&
-                                         intermediate_slot == 0)
-                                    result_data_reg <= tanimoto_item_result[
-                                        intermediate_item[3:0]];
-                                else if (active_task == `MOL_DMA_TASK_PIPELINE &&
-                                         return_intermediate &&
-                                         intermediate_slot == 1)
-                                    result_data_reg <= gnn_item_result[
-                                        intermediate_item[4:0]];
-                                else
-                                    result_data_reg <= small_result_read;
-                                result_valid_reg <= 1'b1;
+                                    !shared_mode) begin
+                                    result_prepared_data <= tanimoto_result;
+                                    result_data_pending <= 1'b1;
+                                end else if (active_task == `MOL_DMA_TASK_PIPELINE &&
+                                         full_gnn && result_index == 0) begin
+                                    result_prepared_data <= tanimoto_item_result[0];
+                                    result_data_pending <= 1'b1;
+                                end else begin
+                                    result_prepared_index <= result_index[4:0];
+                                    result_prepared_small_addr <= small_read_addr;
+                                    result_prepared_small_bank <= small_read_bank;
+                                    result_prepared_item <= intermediate_item[3:0];
+                                    result_prepared_slot <= intermediate_slot[2:0];
+                                    result_prepare_pending <= 1'b1;
+                                end
                             end
                         end else if (result_ready) begin
                             result_valid_reg <= 1'b0;

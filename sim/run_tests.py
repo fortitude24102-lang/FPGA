@@ -106,6 +106,14 @@ TESTS = {
             SIM / "tb_admet_latency.sv",
         ],
     ),
+    "admet_hidden_weight_banks": (
+        "tb_admet_hidden_weight_banks",
+        [
+            RTL / "fc_network.v",
+            RTL / "admet_predictor.v",
+            SIM / "tb_admet_hidden_weight_banks.sv",
+        ],
+    ),
     "top": (
         "tb_top",
         [

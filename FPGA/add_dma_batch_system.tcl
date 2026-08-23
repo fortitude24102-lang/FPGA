@@ -12,6 +12,13 @@ current_bd_design system
 set ps processing_system7_0
 set legacy_bridge ps_axi3_lite_bridge_0
 set accel generator_accelerator_0
+set build_mode release
+if {[info exists ::env(BUILD_MODE)]} {
+    set build_mode [string tolower $::env(BUILD_MODE)]
+}
+if {$build_mode ni {debug release}} {
+    error "BUILD_MODE must be debug or release (got $build_mode)"
+}
 
 foreach required [list $ps $legacy_bridge rst_ps7_0_100M reset_const_0 reset_const_1] {
     if {[llength [get_bd_cells -quiet $required]] != 1} {
@@ -33,6 +40,13 @@ foreach old_cell {
     dma_mem_interconnect
     axis_job_fifo
     axis_result_fifo
+    accelerator_clock_wizard
+    legacy_core_clock_converter
+    dma_ctrl_interconnect
+    accelerator_debug_ila
+    clock_profile_const
+    rst_accelerator_core
+    rst_ps7_0_33M
     rst_ps7_0_150M
     rst_ps7_0_125M
     dma_irq_concat
@@ -54,12 +68,16 @@ set_property -dict [list \
     CONFIG.PCW_S_AXI_HP0_DATA_WIDTH {64} \
     CONFIG.PCW_EN_CLK0_PORT {1} \
     CONFIG.PCW_EN_CLK1_PORT {1} \
+    CONFIG.PCW_EN_CLK2_PORT {1} \
     CONFIG.PCW_FPGA_FCLK0_ENABLE {1} \
     CONFIG.PCW_FPGA_FCLK1_ENABLE {1} \
+    CONFIG.PCW_FPGA_FCLK2_ENABLE {1} \
     CONFIG.PCW_FPGA0_PERIPHERAL_FREQMHZ {100.000000} \
     CONFIG.PCW_FPGA1_PERIPHERAL_FREQMHZ {125.000000} \
+    CONFIG.PCW_FPGA2_PERIPHERAL_FREQMHZ {33.000000} \
     CONFIG.PCW_EN_RST0_PORT {1} \
     CONFIG.PCW_EN_RST1_PORT {1} \
+    CONFIG.PCW_EN_RST2_PORT {1} \
     CONFIG.PCW_USE_FABRIC_INTERRUPT {1} \
     CONFIG.PCW_IRQ_F2P_INTR {1} \
     CONFIG.PCW_ENET0_PERIPHERAL_ENABLE {1} \
@@ -78,6 +96,31 @@ set_property -dict [list \
     CONFIG.ADDR_WIDTH {32} \
     CONFIG.DATA_WIDTH {32} \
 ] $dma_bridge
+
+set ctrl_ic [create_bd_cell -type ip \
+    -vlnv xilinx.com:ip:axi_interconnect:2.1 \
+    dma_ctrl_interconnect]
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {2}] $ctrl_ic
+
+set core_clock [create_bd_cell -type ip \
+    -vlnv xilinx.com:ip:clk_wiz:6.0 \
+    accelerator_clock_wizard]
+set_property -dict [list \
+    CONFIG.USE_DYN_RECONFIG {true} \
+    CONFIG.INTERFACE_SELECTION {Enable_AXI} \
+    CONFIG.PRIM_IN_FREQ {100.000} \
+    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {100.000} \
+] $core_clock
+
+set legacy_clock_converter [create_bd_cell -type ip \
+    -vlnv xilinx.com:ip:axi_clock_converter:2.1 \
+    legacy_core_clock_converter]
+set_property -dict [list \
+    CONFIG.PROTOCOL {AXI4LITE} \
+    CONFIG.ADDR_WIDTH {32} \
+    CONFIG.DATA_WIDTH {32} \
+    CONFIG.ACLK_ASYNC {1} \
+] $legacy_clock_converter
 
 set dma [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma:7.1 axi_dma_0]
 set_property -dict [list \
@@ -143,6 +186,10 @@ set_property -dict [list CONFIG.NUM_SI {2} CONFIG.NUM_MI {1}] $mem_ic
 
 set rst125 [create_bd_cell -type ip \
     -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_ps7_0_125M]
+set rst33 [create_bd_cell -type ip \
+    -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_ps7_0_33M]
+set rst_core [create_bd_cell -type ip \
+    -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_accelerator_core]
 
 set irq_concat [create_bd_cell -type ip \
     -vlnv xilinx.com:ip:xlconcat:2.1 dma_irq_concat]
@@ -152,11 +199,17 @@ set_property -dict [list CONFIG.NUM_PORTS {2}] $irq_concat
 # control path.  A Xilinx protocol converter keeps the DMA visible to HSI so
 # Vitis can bind the axidma driver and generate its configuration table.
 connect_bd_intf_net [get_bd_intf_pins $legacy_bridge/M_AXI] \
+    [get_bd_intf_pins $legacy_clock_converter/S_AXI]
+connect_bd_intf_net [get_bd_intf_pins $legacy_clock_converter/M_AXI] \
     [get_bd_intf_pins $accel/s_axi]
 connect_bd_intf_net [get_bd_intf_pins $ps/M_AXI_GP1] \
     [get_bd_intf_pins $dma_bridge/S_AXI]
 connect_bd_intf_net [get_bd_intf_pins $dma_bridge/M_AXI] \
+    [get_bd_intf_pins $ctrl_ic/S00_AXI]
+connect_bd_intf_net [get_bd_intf_pins $ctrl_ic/M00_AXI] \
     [get_bd_intf_pins $dma/S_AXI_LITE]
+connect_bd_intf_net [get_bd_intf_pins $ctrl_ic/M01_AXI] \
+    [get_bd_intf_pins $core_clock/s_axi_lite]
 
 # AXI4-Stream task/result path, fixed at 128 bits (16 bytes per beat).
 connect_bd_intf_net [get_bd_intf_pins $dma/M_AXIS_MM2S] \
@@ -184,17 +237,32 @@ connect_bd_intf_net [get_bd_intf_pins $mem_ic/M00_AXI] \
 
 set clk100 [get_bd_pins $ps/FCLK_CLK0]
 set clk125 [get_bd_pins $ps/FCLK_CLK1]
+set clk33 [get_bd_pins $ps/FCLK_CLK2]
+set accel_clk [get_bd_pins $core_clock/clk_out1]
 
 connect_bd_net $clk100 \
     [get_bd_pins $ps/M_AXI_GP0_ACLK] \
     [get_bd_pins $ps/M_AXI_GP1_ACLK] \
     [get_bd_pins $legacy_bridge/aclk] \
     [get_bd_pins $dma_bridge/aclk] \
-    [get_bd_pins $accel/s_axi_aclk] \
+    [get_bd_pins $ctrl_ic/ACLK] \
+    [get_bd_pins $ctrl_ic/S00_ACLK] \
+    [get_bd_pins $ctrl_ic/M00_ACLK] \
+    [get_bd_pins $ctrl_ic/M01_ACLK] \
+    [get_bd_pins $core_clock/clk_in1] \
+    [get_bd_pins $core_clock/s_axi_aclk] \
+    [get_bd_pins $legacy_clock_converter/s_axi_aclk] \
     [get_bd_pins $dma/s_axi_lite_aclk] \
+    [get_bd_pins rst_ps7_0_100M/slowest_sync_clk]
+
+connect_bd_net $accel_clk \
+    [get_bd_pins $legacy_clock_converter/m_axi_aclk] \
+    [get_bd_pins $accel/s_axi_aclk] \
     [get_bd_pins $job_fifo/m_axis_aclk] \
     [get_bd_pins $result_fifo/s_axis_aclk] \
-    [get_bd_pins rst_ps7_0_100M/slowest_sync_clk]
+    [get_bd_pins $rst_core/slowest_sync_clk]
+
+connect_bd_net $clk33 [get_bd_pins $rst33/slowest_sync_clk]
 
 connect_bd_net $clk125 \
     [get_bd_pins $ps/S_AXI_HP0_ACLK] \
@@ -213,22 +281,43 @@ connect_bd_net $clk125 \
 # Use the FCLK1 reset source associated with the 125 MHz memory domain.
 connect_bd_net [get_bd_pins $ps/FCLK_RESET1_N] \
     [get_bd_pins $rst125/ext_reset_in]
+connect_bd_net [get_bd_pins $ps/FCLK_RESET2_N] \
+    [get_bd_pins $rst33/ext_reset_in]
+connect_bd_net [get_bd_pins $ps/FCLK_RESET0_N] \
+    [get_bd_pins $rst_core/ext_reset_in]
 # This newly created proc_sys_reset instance has C_AUX_RESET_HIGH=0 in
 # Vivado 2019.2.  Tie aux_reset_in high (inactive); tying it to reset_const_0
 # permanently held the complete DMA/HP0 domain in reset on hardware.
 connect_bd_net [get_bd_pins reset_const_0/dout] \
-    [get_bd_pins $rst125/mb_debug_sys_rst]
+    [get_bd_pins $rst125/mb_debug_sys_rst] \
+    [get_bd_pins $rst33/mb_debug_sys_rst] \
+    [get_bd_pins $rst_core/mb_debug_sys_rst]
 connect_bd_net [get_bd_pins reset_const_1/dout] \
     [get_bd_pins $rst125/aux_reset_in] \
-    [get_bd_pins $rst125/dcm_locked]
+    [get_bd_pins $rst125/dcm_locked] \
+    [get_bd_pins $rst33/aux_reset_in] \
+    [get_bd_pins $rst33/dcm_locked] \
+    [get_bd_pins $rst_core/aux_reset_in]
+connect_bd_net [get_bd_pins $core_clock/locked] \
+    [get_bd_pins $rst_core/dcm_locked]
 
 set reset100n [get_bd_pins rst_ps7_0_100M/peripheral_aresetn]
 set reset125n [get_bd_pins $rst125/peripheral_aresetn]
+set reset_core_n [get_bd_pins $rst_core/peripheral_aresetn]
 connect_bd_net $reset100n \
     [get_bd_pins $legacy_bridge/aresetn] \
     [get_bd_pins $dma_bridge/aresetn] \
+    [get_bd_pins $ctrl_ic/ARESETN] \
+    [get_bd_pins $ctrl_ic/S00_ARESETN] \
+    [get_bd_pins $ctrl_ic/M00_ARESETN] \
+    [get_bd_pins $ctrl_ic/M01_ARESETN] \
+    [get_bd_pins $core_clock/s_axi_aresetn] \
+    [get_bd_pins $legacy_clock_converter/s_axi_aresetn] \
+    [get_bd_pins $dma/axi_resetn]
+
+connect_bd_net $reset_core_n \
+    [get_bd_pins $legacy_clock_converter/m_axi_aresetn] \
     [get_bd_pins $accel/s_axi_aresetn] \
-    [get_bd_pins $dma/axi_resetn] \
     [get_bd_pins $result_fifo/s_axis_aresetn]
 connect_bd_net $reset125n \
     [get_bd_pins $job_fifo/s_axis_aresetn] \
@@ -238,6 +327,37 @@ connect_bd_net $reset125n \
     [get_bd_pins $mem_ic/S00_ARESETN] \
     [get_bd_pins $mem_ic/S01_ARESETN] \
     [get_bd_pins $mem_ic/M00_ARESETN]
+
+if {$build_mode eq "debug"} {
+    set ila [create_bd_cell -type ip -vlnv xilinx.com:ip:ila:6.2 \
+        accelerator_debug_ila]
+    set_property -dict [list \
+        CONFIG.C_MONITOR_TYPE {Native} \
+        CONFIG.C_ENABLE_ILA_AXI_MON {false} \
+        CONFIG.C_NUM_OF_PROBES {6} \
+        CONFIG.C_PROBE0_WIDTH {7} \
+        CONFIG.C_PROBE1_WIDTH {3} \
+        CONFIG.C_PROBE2_WIDTH {3} \
+        CONFIG.C_PROBE3_WIDTH {3} \
+        CONFIG.C_PROBE4_WIDTH {6} \
+        CONFIG.C_PROBE5_WIDTH {2} \
+    ] $ila
+    set profile [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 \
+        clock_profile_const]
+    set_property -dict [list CONFIG.CONST_WIDTH {2} CONFIG.CONST_VAL {0}] $profile
+    connect_bd_net $accel_clk [get_bd_pins $ila/clk]
+    connect_bd_net [get_bd_pins $accel/debug_queue_occupancy] \
+        [get_bd_pins $ila/probe0]
+    connect_bd_net [get_bd_pins $accel/engine_start] \
+        [get_bd_pins $ila/probe1]
+    connect_bd_net [get_bd_pins $accel/engine_busy] \
+        [get_bd_pins $ila/probe2]
+    connect_bd_net [get_bd_pins $accel/engine_done] \
+        [get_bd_pins $ila/probe3]
+    connect_bd_net [get_bd_pins $accel/debug_active_sequence] \
+        [get_bd_pins $ila/probe4]
+    connect_bd_net [get_bd_pins $profile/dout] [get_bd_pins $ila/probe5]
+}
 
 connect_bd_net [get_bd_pins $dma/mm2s_introut] \
     [get_bd_pins $irq_concat/In0]
@@ -254,6 +374,9 @@ assign_bd_address -offset 0x43C00000 -range 0x00040000 \
 assign_bd_address -offset 0x80400000 -range 0x00010000 \
     -target_address_space [get_bd_addr_spaces $ps/Data] \
     [get_bd_addr_segs $dma/S_AXI_LITE/Reg] -force
+assign_bd_address -offset 0x80410000 -range 0x00010000 \
+    -target_address_space [get_bd_addr_spaces $ps/Data] \
+    [get_bd_addr_segs $core_clock/s_axi_lite/reg0] -force
 
 # Expose the PS DDR address window to both DMA data movers.
 foreach dma_space [list \
@@ -280,6 +403,8 @@ set bd_object [get_files -quiet $bd_file]
 reset_target all $bd_object
 generate_target all $bd_object
 puts "DMA_BATCH_BD_CREATED"
+puts "BUILD_MODE=$build_mode"
+puts "RUNTIME_CLOCK_PROFILES_MHZ=50,100,150"
 if {![info exists ::MOL_DMA_KEEP_PROJECT_OPEN] ||
     !$::MOL_DMA_KEEP_PROJECT_OPEN} {
     close_project

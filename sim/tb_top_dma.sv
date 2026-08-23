@@ -17,6 +17,9 @@ module tb_top_dma;
     wire m_valid;
     logic m_ready = 1'b1;
     wire m_last;
+    wire [6:0] debug_queue_occupancy;
+    wire [5:0] debug_active_sequence;
+    logic saw_queued_task = 1'b0;
 
     logic [31:0] request [0:REQUEST_WORDS-1];
     logic [31:0] response [0:RESPONSE_WORDS-1];
@@ -62,7 +65,9 @@ module tb_top_dma;
         .m_axis_result_tkeep(m_keep),
         .m_axis_result_tvalid(m_valid),
         .m_axis_result_tready(m_ready),
-        .m_axis_result_tlast(m_last)
+        .m_axis_result_tlast(m_last),
+        .debug_queue_occupancy(debug_queue_occupancy),
+        .debug_active_sequence(debug_active_sequence)
     );
 
     task automatic send_request;
@@ -83,6 +88,12 @@ module tb_top_dma;
     endtask
 
     always @(posedge clk) begin
+        if (rst_n && debug_queue_occupancy != 0) begin
+            saw_queued_task <= 1'b1;
+            if (debug_active_sequence !== 6'd0)
+                $fatal(1, "first queued task has wrong active sequence %0d",
+                       debug_active_sequence);
+        end
         if (rst_n && m_valid && m_ready) begin
             for (lane = 0; lane < 4; lane = lane + 1)
                 if (m_keep[lane*4 +: 4] == 4'hf) begin
@@ -122,6 +133,8 @@ module tb_top_dma;
         repeat (5000) begin
             @(posedge clk);
             if (response_count == RESPONSE_WORDS) begin
+                if (!saw_queued_task || debug_queue_occupancy !== 0)
+                    $fatal(1, "debug queue probes missed task or did not retire");
                 if (response[0] !== 32'h4d4f4c52 ||
                     response[2] !== 32'h11223344 ||
                     response[8] !== 32'h0000002a ||
