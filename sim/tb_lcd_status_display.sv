@@ -31,6 +31,7 @@ module tb_lcd_status_display;
 
     wire [23:0] lcd_rgb;
     wire lcd_hs, lcd_vs, lcd_de, lcd_clk, lcd_rst, lcd_bl;
+    wire default_lcd_rst, default_lcd_bl;
 
     lcd_status_display #(.POWER_UP_CYCLES(6)) dut (
         .pixel_clk(pixel_clk), .reset_n(reset_n),
@@ -50,6 +51,24 @@ module tb_lcd_status_display;
         .lcd_rgb(lcd_rgb), .lcd_hs(lcd_hs), .lcd_vs(lcd_vs),
         .lcd_de(lcd_de), .lcd_clk(lcd_clk), .lcd_rst(lcd_rst),
         .lcd_bl(lcd_bl)
+    );
+
+    lcd_status_display default_delay_dut (
+        .pixel_clk(pixel_clk), .reset_n(reset_n),
+        .clock_locked(clock_locked), .service_state(service_state),
+        .clock_profile(clock_profile), .current_task(current_task),
+        .temperature_q8_8(temperature_q8_8), .vccint_mv(vccint_mv),
+        .vccaux_mv(vccaux_mv), .engine_busy(engine_busy),
+        .completed_count(completed_count), .failed_count(failed_count),
+        .avg_latency_us(avg_latency_us),
+        .latest_latency0_us(latest_latency0_us),
+        .latest_latency1_us(latest_latency1_us),
+        .latest_latency2_us(latest_latency2_us),
+        .latest_latency3_us(latest_latency3_us),
+        .speedup0_q8_8(speedup0_q8_8), .speedup1_q8_8(speedup1_q8_8),
+        .speedup2_q8_8(speedup2_q8_8), .speedup3_q8_8(speedup3_q8_8),
+        .batch_completed(batch_completed), .batch_total(batch_total),
+        .lcd_rst(default_lcd_rst), .lcd_bl(default_lcd_bl)
     );
 
     always #5 pixel_clk = ~pixel_clk;
@@ -82,6 +101,12 @@ module tb_lcd_status_display;
         @(posedge pixel_clk); #1;
         if (lcd_rst !== 1'b1 || lcd_bl !== 1'b1)
             fail("panel did not enable after power-up delay");
+        repeat (659993) @(posedge pixel_clk);
+        if (default_lcd_rst !== 1'b0 || default_lcd_bl !== 1'b0)
+            fail("default panel enabled before 660000-cycle delay");
+        @(posedge pixel_clk); #1;
+        if (default_lcd_rst !== 1'b1 || default_lcd_bl !== 1'b1)
+            fail("default panel did not enable after 660000 cycles");
         if (lcd_clk !== pixel_clk)
             fail("pixel clock is not forwarded");
 
@@ -94,6 +119,10 @@ module tb_lcd_status_display;
         vs_low = 0;
         active_pixels = 0;
         repeat (FRAME_CYCLES) begin
+            if (lcd_de !==
+                (dut.h_count >= 136 && dut.h_count < 936 &&
+                 dut.v_count >= 35 && dut.v_count < 515))
+                fail("DE window does not match exact porch placement");
             if (!lcd_hs) hs_low = hs_low + 1;
             if (!lcd_vs) vs_low = vs_low + 1;
             if (lcd_de) active_pixels = active_pixels + 1;

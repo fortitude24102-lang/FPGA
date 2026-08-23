@@ -96,9 +96,9 @@ module generator_accelerator_top #(
     output wire [6:0]                      debug_queue_occupancy,
     output wire [5:0]                      debug_active_sequence,
 
-    input  tri0                            lcd_pixel_clk,
-    input  tri0                            lcd_aresetn,
-    input  tri0                            lcd_clock_locked,
+    input  wire                            lcd_pixel_clk,
+    input  wire                            lcd_aresetn,
+    input  wire                            lcd_clock_locked,
     output wire [23:0]                     lcd_rgb,
     output wire                            lcd_hs,
     output wire                            lcd_vs,
@@ -200,6 +200,59 @@ module generator_accelerator_top #(
     reg [15:0] display_speedup3_q8_8;
     reg [31:0] display_batch_completed;
     reg [31:0] display_batch_total;
+    wire [407:0] display_staging_bundle = {
+        display_service_state, display_clock_profile, display_current_task,
+        display_temperature_q8_8, display_vccint_mv, display_vccaux_mv,
+        display_completed_count, display_failed_count, display_avg_latency_us,
+        display_latest_latency0_us, display_latest_latency1_us,
+        display_latest_latency2_us, display_latest_latency3_us,
+        display_speedup0_q8_8, display_speedup1_q8_8,
+        display_speedup2_q8_8, display_speedup3_q8_8,
+        display_batch_completed, display_batch_total
+    };
+    reg [407:0] display_hold_bundle;
+    reg display_commit_toggle;
+    reg display_commit_pending;
+    (* ASYNC_REG = "TRUE" *) reg display_ack_meta;
+    (* ASYNC_REG = "TRUE" *) reg display_ack_sync;
+    (* ASYNC_REG = "TRUE" *) reg display_commit_meta;
+    (* ASYNC_REG = "TRUE" *) reg display_commit_sync;
+    reg display_ack_toggle;
+    reg [407:0] display_pixel_bundle;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] display_engine_busy_meta;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] display_pixel_engine_busy;
+    wire [2:0] display_pixel_service_state;
+    wire [1:0] display_pixel_clock_profile;
+    wire [2:0] display_pixel_current_task;
+    wire [15:0] display_pixel_temperature_q8_8;
+    wire [15:0] display_pixel_vccint_mv;
+    wire [15:0] display_pixel_vccaux_mv;
+    wire [31:0] display_pixel_completed_count;
+    wire [31:0] display_pixel_failed_count;
+    wire [31:0] display_pixel_avg_latency_us;
+    wire [31:0] display_pixel_latest_latency0_us;
+    wire [31:0] display_pixel_latest_latency1_us;
+    wire [31:0] display_pixel_latest_latency2_us;
+    wire [31:0] display_pixel_latest_latency3_us;
+    wire [15:0] display_pixel_speedup0_q8_8;
+    wire [15:0] display_pixel_speedup1_q8_8;
+    wire [15:0] display_pixel_speedup2_q8_8;
+    wire [15:0] display_pixel_speedup3_q8_8;
+    wire [31:0] display_pixel_batch_completed;
+    wire [31:0] display_pixel_batch_total;
+
+    assign {
+        display_pixel_service_state, display_pixel_clock_profile,
+        display_pixel_current_task, display_pixel_temperature_q8_8,
+        display_pixel_vccint_mv, display_pixel_vccaux_mv,
+        display_pixel_completed_count, display_pixel_failed_count,
+        display_pixel_avg_latency_us, display_pixel_latest_latency0_us,
+        display_pixel_latest_latency1_us, display_pixel_latest_latency2_us,
+        display_pixel_latest_latency3_us, display_pixel_speedup0_q8_8,
+        display_pixel_speedup1_q8_8, display_pixel_speedup2_q8_8,
+        display_pixel_speedup3_q8_8, display_pixel_batch_completed,
+        display_pixel_batch_total
+    } = display_pixel_bundle;
     reg [DATA_WIDTH-1:0] gnn_weight_data_reg;
     reg [DATA_WIDTH-1:0] admet_weight_data_reg;
     reg gnn_weight_we;
@@ -321,6 +374,11 @@ module generator_accelerator_top #(
             display_speedup3_q8_8 <= 16'd586;
             display_batch_completed <= 32'd0;
             display_batch_total <= 32'd100000;
+            display_hold_bundle <= 408'd0;
+            display_commit_toggle <= 1'b0;
+            display_commit_pending <= 1'b0;
+            display_ack_meta <= 1'b0;
+            display_ack_sync <= 1'b0;
             gnn_weight_data_reg  <= {DATA_WIDTH{1'b0}};
             admet_weight_data_reg<= {DATA_WIDTH{1'b0}};
             gnn_weight_we        <= 1'b0;
@@ -344,6 +402,8 @@ module generator_accelerator_top #(
             legacy_fingerprint_wstrb <= 4'd0;
             descriptor_buffer    <= {2*20*DATA_WIDTH{1'b0}};
         end else begin
+            display_ack_meta <= display_ack_toggle;
+            display_ack_sync <= display_ack_meta;
             command_start <= 1'b0;
             command_clear <= 1'b0;
             gnn_weight_we <= 1'b0;
@@ -352,6 +412,13 @@ module generator_accelerator_top #(
             admet_cfg_we  <= 1'b0;
             legacy_query_we <= 1'b0;
             legacy_db_we <= 1'b0;
+
+            if (display_commit_pending &&
+                display_ack_sync == display_commit_toggle) begin
+                display_hold_bundle <= display_staging_bundle;
+                display_commit_toggle <= ~display_commit_toggle;
+                display_commit_pending <= 1'b0;
+            end
 
             if (dma_test_mode == 2'd3 && m_axis_result_tready &&
                 dma_test_source_index < dma_test_beats)
@@ -412,6 +479,28 @@ module generator_accelerator_top #(
                     display_batch_completed <= held_wdata;
                 end else if (held_awaddr == ADDR_LCD_BATCH_TOTAL) begin
                     display_batch_total <= held_wdata;
+                    if (display_ack_sync == display_commit_toggle &&
+                        !display_commit_pending) begin
+                        display_hold_bundle <= {
+                            display_service_state, display_clock_profile,
+                            display_current_task,
+                            display_temperature_q8_8, display_vccint_mv,
+                            display_vccaux_mv, display_completed_count,
+                            display_failed_count, display_avg_latency_us,
+                            display_latest_latency0_us,
+                            display_latest_latency1_us,
+                            display_latest_latency2_us,
+                            display_latest_latency3_us,
+                            display_speedup0_q8_8,
+                            display_speedup1_q8_8,
+                            display_speedup2_q8_8,
+                            display_speedup3_q8_8,
+                            display_batch_completed, held_wdata
+                        };
+                        display_commit_toggle <= ~display_commit_toggle;
+                    end else begin
+                        display_commit_pending <= 1'b1;
+                    end
                 end else if (held_awaddr >= ADDR_QUERY_BASE &&
                              held_awaddr < ADDR_QUERY_BASE + 128) begin
                     legacy_query_we <= 1'b1;
@@ -479,6 +568,26 @@ module generator_accelerator_top #(
                 descriptor_buffer[(dma_admet_input_write_bank*20 +
                                    dma_descriptor_addr)*DATA_WIDTH +:
                                   DATA_WIDTH] <= dma_descriptor_wdata;
+        end
+    end
+
+    always @(posedge lcd_pixel_clk or negedge lcd_aresetn) begin
+        if (!lcd_aresetn) begin
+            display_commit_meta <= 1'b0;
+            display_commit_sync <= 1'b0;
+            display_ack_toggle <= 1'b0;
+            display_pixel_bundle <= 408'd0;
+            display_engine_busy_meta <= 3'd0;
+            display_pixel_engine_busy <= 3'd0;
+        end else begin
+            display_commit_meta <= display_commit_toggle;
+            display_commit_sync <= display_commit_meta;
+            display_engine_busy_meta <= engine_busy;
+            display_pixel_engine_busy <= display_engine_busy_meta;
+            if (display_commit_sync != display_ack_toggle) begin
+                display_pixel_bundle <= display_hold_bundle;
+                display_ack_toggle <= display_commit_sync;
+            end
         end
     end
 
@@ -1170,26 +1279,26 @@ module generator_accelerator_top #(
         .pixel_clk(lcd_pixel_clk),
         .reset_n(lcd_aresetn),
         .clock_locked(lcd_clock_locked),
-        .service_state(display_service_state),
-        .clock_profile(display_clock_profile),
-        .current_task(display_current_task),
-        .temperature_q8_8(display_temperature_q8_8),
-        .vccint_mv(display_vccint_mv),
-        .vccaux_mv(display_vccaux_mv),
-        .engine_busy(engine_busy),
-        .completed_count(display_completed_count),
-        .failed_count(display_failed_count),
-        .avg_latency_us(display_avg_latency_us),
-        .latest_latency0_us(display_latest_latency0_us),
-        .latest_latency1_us(display_latest_latency1_us),
-        .latest_latency2_us(display_latest_latency2_us),
-        .latest_latency3_us(display_latest_latency3_us),
-        .speedup0_q8_8(display_speedup0_q8_8),
-        .speedup1_q8_8(display_speedup1_q8_8),
-        .speedup2_q8_8(display_speedup2_q8_8),
-        .speedup3_q8_8(display_speedup3_q8_8),
-        .batch_completed(display_batch_completed),
-        .batch_total(display_batch_total),
+        .service_state(display_pixel_service_state),
+        .clock_profile(display_pixel_clock_profile),
+        .current_task(display_pixel_current_task),
+        .temperature_q8_8(display_pixel_temperature_q8_8),
+        .vccint_mv(display_pixel_vccint_mv),
+        .vccaux_mv(display_pixel_vccaux_mv),
+        .engine_busy(display_pixel_engine_busy),
+        .completed_count(display_pixel_completed_count),
+        .failed_count(display_pixel_failed_count),
+        .avg_latency_us(display_pixel_avg_latency_us),
+        .latest_latency0_us(display_pixel_latest_latency0_us),
+        .latest_latency1_us(display_pixel_latest_latency1_us),
+        .latest_latency2_us(display_pixel_latest_latency2_us),
+        .latest_latency3_us(display_pixel_latest_latency3_us),
+        .speedup0_q8_8(display_pixel_speedup0_q8_8),
+        .speedup1_q8_8(display_pixel_speedup1_q8_8),
+        .speedup2_q8_8(display_pixel_speedup2_q8_8),
+        .speedup3_q8_8(display_pixel_speedup3_q8_8),
+        .batch_completed(display_pixel_batch_completed),
+        .batch_total(display_pixel_batch_total),
         .lcd_rgb(lcd_rgb), .lcd_hs(lcd_hs), .lcd_vs(lcd_vs),
         .lcd_de(lcd_de), .lcd_clk(lcd_clk), .lcd_rst(lcd_rst),
         .lcd_bl(lcd_bl)

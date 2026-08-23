@@ -169,7 +169,7 @@ check_pin_net rst_ps7_0_33M/slowest_sync_clk processing_system7_0/FCLK_CLK2
 check_pin_net rst_ps7_0_33M/ext_reset_in processing_system7_0/FCLK_RESET2_N
 check_pin_net generator_accelerator_0/lcd_pixel_clk processing_system7_0/FCLK_CLK2
 check_pin_net generator_accelerator_0/lcd_aresetn rst_ps7_0_33M/peripheral_aresetn
-check_pin_net generator_accelerator_0/lcd_clock_locked reset_const_1/dout
+check_pin_net generator_accelerator_0/lcd_clock_locked rst_ps7_0_33M/peripheral_aresetn
 foreach lcd_port {lcd_rgb lcd_hs lcd_vs lcd_de lcd_clk lcd_rst lcd_bl} {
     check_external_pin generator_accelerator_0/$lcd_port $lcd_port
 }

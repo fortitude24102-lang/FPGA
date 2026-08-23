@@ -32,8 +32,14 @@ module tb_top;
     wire m_axis_result_tvalid;
     logic m_axis_result_tready = 1'b1;
     wire m_axis_result_tlast;
+    logic lcd_pixel_clk_driver = 1'b0;
+    wire lcd_pixel_clk = lcd_pixel_clk_driver;
+    wire lcd_reset_n = rst_n;
+    wire [23:0] lcd_rgb;
+    wire lcd_hs, lcd_vs, lcd_de, lcd_clk, lcd_rst, lcd_bl;
 
     always #5 clk = ~clk;
+    always #7 lcd_pixel_clk_driver = ~lcd_pixel_clk_driver;
 
     generator_accelerator_top #(
         .C_S_AXI_ADDR_WIDTH(ADDR_WIDTH),
@@ -72,8 +78,10 @@ module tb_top;
         .m_axis_result_tvalid(m_axis_result_tvalid),
         .m_axis_result_tready(m_axis_result_tready),
         .m_axis_result_tlast(m_axis_result_tlast),
-        .lcd_pixel_clk(1'b0), .lcd_aresetn(1'b0),
-        .lcd_clock_locked(1'b0)
+        .lcd_pixel_clk(lcd_pixel_clk), .lcd_aresetn(lcd_reset_n),
+        .lcd_clock_locked(1'b1), .lcd_rgb(lcd_rgb), .lcd_hs(lcd_hs),
+        .lcd_vs(lcd_vs), .lcd_de(lcd_de), .lcd_clk(lcd_clk),
+        .lcd_rst(lcd_rst), .lcd_bl(lcd_bl)
     );
 
     task automatic axi_write(input logic [ADDR_WIDTH-1:0] address,
@@ -204,6 +212,38 @@ module tb_top;
                 "GNN readback got=[0x%08x,0x%08x], expected=[0x0e000000,0]",
                 gnn_word0, gnn_word1);
         $display("PASS AXI-Lite GNN task and synchronous BRAM readback");
+
+        // Dashboard values cross clock domains only after the final register
+        // write commits a stable bundle.
+        axi_write(18'h00500, 32'h0000_0074);
+        axi_write(18'h00504, 32'h0000_2d80);
+        repeat (6) @(posedge lcd_pixel_clk);
+        if (dut.display_pixel_service_state !== 3'd0 ||
+            dut.display_pixel_temperature_q8_8 !== 16'd0)
+            $fatal(1, "LCD dashboard changed before bundle commit");
+        axi_write(18'h0053c, 32'd100000);
+        repeat (6) @(posedge lcd_pixel_clk);
+        if (dut.display_pixel_service_state !== 3'd4 ||
+            dut.display_pixel_clock_profile !== 2'd2 ||
+            dut.display_pixel_current_task !== 3'd3 ||
+            dut.display_pixel_temperature_q8_8 !== 16'h2d80)
+            $fatal(1, "LCD dashboard committed bundle is inconsistent");
+        axi_write(18'h00500, 32'h0000_0029);
+        repeat (6) @(posedge lcd_pixel_clk);
+        if (dut.display_pixel_service_state !== 3'd4)
+            $fatal(1, "LCD dashboard exposed an uncommitted update");
+        axi_write(18'h0053c, 32'd100000);
+        repeat (6) @(posedge lcd_pixel_clk);
+        if (dut.display_pixel_service_state !== 3'd1 ||
+            dut.display_pixel_clock_profile !== 2'd1 ||
+            dut.display_pixel_current_task !== 3'd1)
+            $fatal(1, "LCD dashboard second commit was not transferred");
+        force dut.engine_busy = 3'b101;
+        repeat (4) @(posedge lcd_pixel_clk);
+        if (dut.display_pixel_engine_busy !== 3'b101)
+            $fatal(1, "LCD engine busy synchronizer did not settle");
+        release dut.engine_busy;
+        $display("PASS LCD dashboard atomic CDC bundle and live status sync");
 
         $display("ALL TOP-LEVEL TESTS PASSED");
         $finish;

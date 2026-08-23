@@ -337,8 +337,7 @@ connect_bd_net $reset125n \
     [get_bd_pins $mem_ic/M00_ARESETN]
 
 connect_bd_net $reset33n \
-    [get_bd_pins $accel/lcd_aresetn]
-connect_bd_net [get_bd_pins reset_const_1/dout] \
+    [get_bd_pins $accel/lcd_aresetn] \
     [get_bd_pins $accel/lcd_clock_locked]
 
 # RGB LCD and HDMI-IN share the 24 color pins on this board.  Only the LCD
