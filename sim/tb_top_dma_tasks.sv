@@ -69,7 +69,9 @@ module tb_top_dma_tasks;
         .m_axis_result_tdata(m_data), .m_axis_result_tkeep(m_keep),
         .m_axis_result_tvalid(m_valid), .m_axis_result_tready(m_ready),
         .m_axis_result_tlast(m_last),
-        .engine_start(engine_start)
+        .engine_start(engine_start),
+        .lcd_pixel_clk(1'b0), .lcd_aresetn(1'b0),
+        .lcd_clock_locked(1'b0)
     );
 
     task automatic axi_write(input [17:0] address, input [31:0] value);

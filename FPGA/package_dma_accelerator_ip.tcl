@@ -15,6 +15,7 @@ set rtl_files {
     dma_task_queue.v
     dma_result_formatter.v
     dma_accelerator_backend.v
+    lcd_status_display.v
     generator_accelerator_top.v
     mol_dma_protocol.vh
 }
@@ -53,6 +54,17 @@ update_compile_order -fileset sources_1
 
 set core [ipx::open_core $component]
 ipx::merge_project_changes ports $core
+
+# These are physical panel outputs, not clock/reset interfaces consumed by
+# another IP.  Keep them as plain pins so Block Design externalizes the exact
+# board-level port names used by the XDC.
+foreach physical_output {lcd_clk lcd_rst} {
+    set inferred [ipx::get_bus_interfaces -quiet $physical_output \
+                  -of_objects $core]
+    if {[llength $inferred] != 0} {
+        ipx::remove_bus_interface $inferred $core
+    }
+}
 
 foreach group_name {xilinx_anylanguagesynthesis \
                     xilinx_anylanguagebehavioralsimulation} {
@@ -124,10 +136,21 @@ if {[llength $reset_polarity] != 0} {
     set_property value ACTIVE_LOW $reset_polarity
 }
 
-set_property core_revision 8 $core
+set lcd_clock [ipx::get_bus_interfaces -quiet lcd_pixel_clk -of_objects $core]
+if {[llength $lcd_clock] == 1} {
+    set lcd_associated_reset [ipx::get_bus_parameters -quiet ASSOCIATED_RESET \
+                              -of_objects $lcd_clock]
+    if {[llength $lcd_associated_reset] == 0} {
+        set lcd_associated_reset [ipx::add_bus_parameter ASSOCIATED_RESET \
+                                  $lcd_clock]
+    }
+    set_property value lcd_aresetn $lcd_associated_reset
+}
+
+set_property core_revision 9 $core
 set_property display_name {Z15 Molecular Accelerator with DMA Batch Streams} $core
 set_property description \
-    {Variable-clock Tanimoto, GNN, ADMET and pipeline accelerator with AXI-Lite control, 128-bit AXIS DMA batches and debug probes} $core
+    {Variable-clock Tanimoto, GNN, ADMET and pipeline accelerator with AXI-Lite control, 128-bit AXIS DMA batches, debug probes and 800x480 RGB status display} $core
 
 ipx::update_checksums $core
 ipx::save_core $core

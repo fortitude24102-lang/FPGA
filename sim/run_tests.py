@@ -17,6 +17,10 @@ PROTOCOL_TEST = SIM / "test_dma_protocol_codegen.py"
 PROTOCOL_GENERATOR = ROOT / "tools" / "generate_dma_protocol.py"
 
 TESTS = {
+    "lcd_status": (
+        "tb_lcd_status_display",
+        [RTL / "lcd_status_display.v", SIM / "tb_lcd_status_display.sv"],
+    ),
     "task_scoreboard": (
         "tb_dma_task_scoreboard",
         [RTL / "dma_task_queue.v", SIM / "tb_dma_task_scoreboard.sv"],
@@ -316,6 +320,9 @@ def main() -> int:
     for name, (top, sources) in selected.items():
         print(f"\n===== {name}: compile =====")
         output = args.build_dir / f"{name}.vvp"
+        dependencies = []
+        if RTL / "generator_accelerator_top.v" in sources:
+            dependencies.append(RTL / "lcd_status_display.v")
         compile_command = [
             iverilog,
             "-g2012",
@@ -326,6 +333,7 @@ def main() -> int:
             top,
             "-o",
             str(output),
+            *(str(source) for source in dependencies),
             *(str(source) for source in sources),
         ]
         if run_command(

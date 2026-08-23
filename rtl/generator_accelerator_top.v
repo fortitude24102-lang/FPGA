@@ -94,7 +94,18 @@ module generator_accelerator_top #(
     output wire [2:0]                      engine_start,
     output wire [2:0]                      engine_done,
     output wire [6:0]                      debug_queue_occupancy,
-    output wire [5:0]                      debug_active_sequence
+    output wire [5:0]                      debug_active_sequence,
+
+    input  tri0                            lcd_pixel_clk,
+    input  tri0                            lcd_aresetn,
+    input  tri0                            lcd_clock_locked,
+    output wire [23:0]                     lcd_rgb,
+    output wire                            lcd_hs,
+    output wire                            lcd_vs,
+    output wire                            lcd_de,
+    output wire                            lcd_clk,
+    output wire                            lcd_rst,
+    output wire                            lcd_bl
 );
 
     localparam integer GNN_FEATURE_BITS =
@@ -130,6 +141,22 @@ module generator_accelerator_top #(
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_GNN_WCOMMIT  = 18'h00404;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_ADMET_WDATA  = 18'h00410;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_ADMET_COMMIT = 18'h00414;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_STATUS    = 18'h00500;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_TEMP      = 18'h00504;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_VOLTAGE   = 18'h00508;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_DONE      = 18'h0050c;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_FAIL      = 18'h00510;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_AVG_LAT   = 18'h00514;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_LAT0      = 18'h00518;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_LAT1      = 18'h0051c;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_LAT2      = 18'h00520;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_LAT3      = 18'h00524;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_SPEED0    = 18'h00528;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_SPEED1    = 18'h0052c;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_SPEED2    = 18'h00530;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_SPEED3    = 18'h00534;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_BATCH_DONE= 18'h00538;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_BATCH_TOTAL=18'h0053c;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_ADJ_BASE     = 18'h01000;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_FEATURE_BASE = 18'h02000;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_GNN_OUT_BASE = 18'h04000;
@@ -154,6 +181,25 @@ module generator_accelerator_top #(
     reg [1:0] dma_test_mode;
     reg [31:0] dma_test_beats;
     reg [31:0] dma_test_source_index;
+    reg [2:0] display_service_state;
+    reg [1:0] display_clock_profile;
+    reg [2:0] display_current_task;
+    reg [15:0] display_temperature_q8_8;
+    reg [15:0] display_vccint_mv;
+    reg [15:0] display_vccaux_mv;
+    reg [31:0] display_completed_count;
+    reg [31:0] display_failed_count;
+    reg [31:0] display_avg_latency_us;
+    reg [31:0] display_latest_latency0_us;
+    reg [31:0] display_latest_latency1_us;
+    reg [31:0] display_latest_latency2_us;
+    reg [31:0] display_latest_latency3_us;
+    reg [15:0] display_speedup0_q8_8;
+    reg [15:0] display_speedup1_q8_8;
+    reg [15:0] display_speedup2_q8_8;
+    reg [15:0] display_speedup3_q8_8;
+    reg [31:0] display_batch_completed;
+    reg [31:0] display_batch_total;
     reg [DATA_WIDTH-1:0] gnn_weight_data_reg;
     reg [DATA_WIDTH-1:0] admet_weight_data_reg;
     reg gnn_weight_we;
@@ -256,6 +302,25 @@ module generator_accelerator_top #(
             dma_test_mode        <= 2'd0;
             dma_test_beats       <= 32'd0;
             dma_test_source_index<= 32'd0;
+            display_service_state <= 3'd1;
+            display_clock_profile <= 2'd1;
+            display_current_task <= 3'd7;
+            display_temperature_q8_8 <= 16'h2d00;
+            display_vccint_mv <= 16'd1000;
+            display_vccaux_mv <= 16'd1800;
+            display_completed_count <= 32'd0;
+            display_failed_count <= 32'd0;
+            display_avg_latency_us <= 32'd0;
+            display_latest_latency0_us <= 32'd14;
+            display_latest_latency1_us <= 32'd5890;
+            display_latest_latency2_us <= 32'd3;
+            display_latest_latency3_us <= 32'd5891;
+            display_speedup0_q8_8 <= 16'd5215;
+            display_speedup1_q8_8 <= 16'd586;
+            display_speedup2_q8_8 <= 16'd10470;
+            display_speedup3_q8_8 <= 16'd586;
+            display_batch_completed <= 32'd0;
+            display_batch_total <= 32'd100000;
             gnn_weight_data_reg  <= {DATA_WIDTH{1'b0}};
             admet_weight_data_reg<= {DATA_WIDTH{1'b0}};
             gnn_weight_we        <= 1'b0;
@@ -312,6 +377,41 @@ module generator_accelerator_top #(
                     dma_test_source_index <= 32'd0;
                 end else if (held_awaddr == ADDR_DMA_TEST_BEATS) begin
                     dma_test_beats <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_STATUS) begin
+                    display_service_state <= held_wdata[2:0];
+                    display_clock_profile <= held_wdata[4:3];
+                    display_current_task <= held_wdata[7:5];
+                end else if (held_awaddr == ADDR_LCD_TEMP) begin
+                    display_temperature_q8_8 <= held_wdata[15:0];
+                end else if (held_awaddr == ADDR_LCD_VOLTAGE) begin
+                    display_vccint_mv <= held_wdata[15:0];
+                    display_vccaux_mv <= held_wdata[31:16];
+                end else if (held_awaddr == ADDR_LCD_DONE) begin
+                    display_completed_count <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_FAIL) begin
+                    display_failed_count <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_AVG_LAT) begin
+                    display_avg_latency_us <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_LAT0) begin
+                    display_latest_latency0_us <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_LAT1) begin
+                    display_latest_latency1_us <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_LAT2) begin
+                    display_latest_latency2_us <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_LAT3) begin
+                    display_latest_latency3_us <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_SPEED0) begin
+                    display_speedup0_q8_8 <= held_wdata[15:0];
+                end else if (held_awaddr == ADDR_LCD_SPEED1) begin
+                    display_speedup1_q8_8 <= held_wdata[15:0];
+                end else if (held_awaddr == ADDR_LCD_SPEED2) begin
+                    display_speedup2_q8_8 <= held_wdata[15:0];
+                end else if (held_awaddr == ADDR_LCD_SPEED3) begin
+                    display_speedup3_q8_8 <= held_wdata[15:0];
+                end else if (held_awaddr == ADDR_LCD_BATCH_DONE) begin
+                    display_batch_completed <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_BATCH_TOTAL) begin
+                    display_batch_total <= held_wdata;
                 end else if (held_awaddr >= ADDR_QUERY_BASE &&
                              held_awaddr < ADDR_QUERY_BASE + 128) begin
                     legacy_query_we <= 1'b1;
@@ -966,6 +1066,39 @@ module generator_accelerator_top #(
             read_data_mux = {30'd0, dma_test_mode};
         end else if (s_axi_araddr == ADDR_DMA_TEST_BEATS) begin
             read_data_mux = dma_test_beats;
+        end else if (s_axi_araddr == ADDR_LCD_STATUS) begin
+            read_data_mux = {24'd0, display_current_task,
+                             display_clock_profile, display_service_state};
+        end else if (s_axi_araddr == ADDR_LCD_TEMP) begin
+            read_data_mux = {16'd0, display_temperature_q8_8};
+        end else if (s_axi_araddr == ADDR_LCD_VOLTAGE) begin
+            read_data_mux = {display_vccaux_mv, display_vccint_mv};
+        end else if (s_axi_araddr == ADDR_LCD_DONE) begin
+            read_data_mux = display_completed_count;
+        end else if (s_axi_araddr == ADDR_LCD_FAIL) begin
+            read_data_mux = display_failed_count;
+        end else if (s_axi_araddr == ADDR_LCD_AVG_LAT) begin
+            read_data_mux = display_avg_latency_us;
+        end else if (s_axi_araddr == ADDR_LCD_LAT0) begin
+            read_data_mux = display_latest_latency0_us;
+        end else if (s_axi_araddr == ADDR_LCD_LAT1) begin
+            read_data_mux = display_latest_latency1_us;
+        end else if (s_axi_araddr == ADDR_LCD_LAT2) begin
+            read_data_mux = display_latest_latency2_us;
+        end else if (s_axi_araddr == ADDR_LCD_LAT3) begin
+            read_data_mux = display_latest_latency3_us;
+        end else if (s_axi_araddr == ADDR_LCD_SPEED0) begin
+            read_data_mux = {16'd0, display_speedup0_q8_8};
+        end else if (s_axi_araddr == ADDR_LCD_SPEED1) begin
+            read_data_mux = {16'd0, display_speedup1_q8_8};
+        end else if (s_axi_araddr == ADDR_LCD_SPEED2) begin
+            read_data_mux = {16'd0, display_speedup2_q8_8};
+        end else if (s_axi_araddr == ADDR_LCD_SPEED3) begin
+            read_data_mux = {16'd0, display_speedup3_q8_8};
+        end else if (s_axi_araddr == ADDR_LCD_BATCH_DONE) begin
+            read_data_mux = display_batch_completed;
+        end else if (s_axi_araddr == ADDR_LCD_BATCH_TOTAL) begin
+            read_data_mux = display_batch_total;
         end else if (s_axi_araddr >= ADDR_QUERY_BASE &&
                      s_axi_araddr < ADDR_QUERY_BASE + 128) begin
             read_data_mux = query_fingerprint[
@@ -1032,5 +1165,34 @@ module generator_accelerator_top #(
             end
         end
     end
+
+    lcd_status_display u_lcd_status_display (
+        .pixel_clk(lcd_pixel_clk),
+        .reset_n(lcd_aresetn),
+        .clock_locked(lcd_clock_locked),
+        .service_state(display_service_state),
+        .clock_profile(display_clock_profile),
+        .current_task(display_current_task),
+        .temperature_q8_8(display_temperature_q8_8),
+        .vccint_mv(display_vccint_mv),
+        .vccaux_mv(display_vccaux_mv),
+        .engine_busy(engine_busy),
+        .completed_count(display_completed_count),
+        .failed_count(display_failed_count),
+        .avg_latency_us(display_avg_latency_us),
+        .latest_latency0_us(display_latest_latency0_us),
+        .latest_latency1_us(display_latest_latency1_us),
+        .latest_latency2_us(display_latest_latency2_us),
+        .latest_latency3_us(display_latest_latency3_us),
+        .speedup0_q8_8(display_speedup0_q8_8),
+        .speedup1_q8_8(display_speedup1_q8_8),
+        .speedup2_q8_8(display_speedup2_q8_8),
+        .speedup3_q8_8(display_speedup3_q8_8),
+        .batch_completed(display_batch_completed),
+        .batch_total(display_batch_total),
+        .lcd_rgb(lcd_rgb), .lcd_hs(lcd_hs), .lcd_vs(lcd_vs),
+        .lcd_de(lcd_de), .lcd_clk(lcd_clk), .lcd_rst(lcd_rst),
+        .lcd_bl(lcd_bl)
+    );
 
 endmodule

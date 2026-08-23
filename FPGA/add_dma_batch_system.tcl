@@ -1,6 +1,8 @@
 set script_dir [file dirname [file normalize [info script]]]
 set project_file [file join $script_dir FPGA.xpr]
 set bd_file [file join $script_dir FPGA.srcs sources_1 bd system system.bd]
+set lcd_xdc [file normalize [file join $script_dir .. constraints \
+                             Z15_LCD_800x480.xdc]]
 
 if {[current_project -quiet] eq ""} {
     open_project $project_file
@@ -8,6 +10,10 @@ if {[current_project -quiet] eq ""} {
 update_ip_catalog
 open_bd_design $bd_file
 current_bd_design system
+
+if {[llength [get_files -quiet *Z15_LCD_800x480.xdc]] == 0} {
+    add_files -fileset constrs_1 -norecurse $lcd_xdc
+}
 
 set ps processing_system7_0
 set legacy_bridge ps_axi3_lite_bridge_0
@@ -263,6 +269,7 @@ connect_bd_net $accel_clk \
     [get_bd_pins $rst_core/slowest_sync_clk]
 
 connect_bd_net $clk33 [get_bd_pins $rst33/slowest_sync_clk]
+connect_bd_net $clk33 [get_bd_pins $accel/lcd_pixel_clk]
 
 connect_bd_net $clk125 \
     [get_bd_pins $ps/S_AXI_HP0_ACLK] \
@@ -304,6 +311,7 @@ connect_bd_net [get_bd_pins $core_clock/locked] \
 set reset100n [get_bd_pins rst_ps7_0_100M/peripheral_aresetn]
 set reset125n [get_bd_pins $rst125/peripheral_aresetn]
 set reset_core_n [get_bd_pins $rst_core/peripheral_aresetn]
+set reset33n [get_bd_pins $rst33/peripheral_aresetn]
 connect_bd_net $reset100n \
     [get_bd_pins $legacy_bridge/aresetn] \
     [get_bd_pins $dma_bridge/aresetn] \
@@ -327,6 +335,31 @@ connect_bd_net $reset125n \
     [get_bd_pins $mem_ic/S00_ARESETN] \
     [get_bd_pins $mem_ic/S01_ARESETN] \
     [get_bd_pins $mem_ic/M00_ARESETN]
+
+connect_bd_net $reset33n \
+    [get_bd_pins $accel/lcd_aresetn]
+connect_bd_net [get_bd_pins reset_const_1/dout] \
+    [get_bd_pins $accel/lcd_clock_locked]
+
+# RGB LCD and HDMI-IN share the 24 color pins on this board.  Only the LCD
+# outputs are externalized here; an HDMI-IN design must remove these ports.
+foreach lcd_port {lcd_rgb lcd_hs lcd_vs lcd_de lcd_clk lcd_rst lcd_bl} {
+    set stale [get_bd_ports -quiet $lcd_port]
+    if {[llength $stale] != 0} {
+        delete_bd_objs $stale
+    }
+    set lcd_pin [get_bd_pins -quiet $accel/$lcd_port]
+    if {[llength $lcd_pin] != 1} {
+        error "LCD output pin is missing from packaged IP: $lcd_port"
+    }
+    make_bd_pins_external $lcd_pin
+    set lcd_net [get_bd_nets -quiet -of_objects $lcd_pin]
+    set external [get_bd_ports -quiet -of_objects $lcd_net]
+    if {[llength $external] != 1} {
+        error "Failed to externalize LCD output pin: $lcd_port"
+    }
+    set_property name $lcd_port $external
+}
 
 if {$build_mode eq "debug"} {
     set ila [create_bd_cell -type ip -vlnv xilinx.com:ip:ila:6.2 \

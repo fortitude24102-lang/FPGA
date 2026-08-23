@@ -60,7 +60,9 @@ module tb_pipeline_latency;
         .m_axis_result_tkeep(),
         .m_axis_result_tvalid(),
         .m_axis_result_tready(1'b1),
-        .m_axis_result_tlast()
+        .m_axis_result_tlast(),
+        .lcd_pixel_clk(1'b0), .lcd_aresetn(1'b0),
+        .lcd_clock_locked(1'b0)
     );
 
     initial begin

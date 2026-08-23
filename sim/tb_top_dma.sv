@@ -67,7 +67,9 @@ module tb_top_dma;
         .m_axis_result_tready(m_ready),
         .m_axis_result_tlast(m_last),
         .debug_queue_occupancy(debug_queue_occupancy),
-        .debug_active_sequence(debug_active_sequence)
+        .debug_active_sequence(debug_active_sequence),
+        .lcd_pixel_clk(1'b0), .lcd_aresetn(1'b0),
+        .lcd_clock_locked(1'b0)
     );
 
     task automatic send_request;

@@ -71,7 +71,9 @@ module tb_top;
         .m_axis_result_tkeep(m_axis_result_tkeep),
         .m_axis_result_tvalid(m_axis_result_tvalid),
         .m_axis_result_tready(m_axis_result_tready),
-        .m_axis_result_tlast(m_axis_result_tlast)
+        .m_axis_result_tlast(m_axis_result_tlast),
+        .lcd_pixel_clk(1'b0), .lcd_aresetn(1'b0),
+        .lcd_clock_locked(1'b0)
     );
 
     task automatic axi_write(input logic [ADDR_WIDTH-1:0] address,

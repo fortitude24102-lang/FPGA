@@ -55,6 +55,20 @@ proc check_pin_net {pin_name expected_source} {
     }
 }
 
+proc check_external_pin {pin_name port_name} {
+    set pin [get_bd_pins -quiet $pin_name]
+    set port [get_bd_ports -quiet $port_name]
+    if {[llength $pin] != 1 || [llength $port] != 1} {
+        lappend ::failures "missing external connection $pin_name -> $port_name"
+        return
+    }
+    set pin_net [get_bd_nets -quiet -of_objects $pin]
+    set port_net [get_bd_nets -quiet -of_objects $port]
+    if {[llength $pin_net] != 1 || $pin_net ne $port_net} {
+        lappend ::failures "$pin_name is not connected to port $port_name"
+    }
+}
+
 foreach name {
     processing_system7_0
     ps_axi3_lite_bridge_0
@@ -153,6 +167,21 @@ foreach pin {
 
 check_pin_net rst_ps7_0_33M/slowest_sync_clk processing_system7_0/FCLK_CLK2
 check_pin_net rst_ps7_0_33M/ext_reset_in processing_system7_0/FCLK_RESET2_N
+check_pin_net generator_accelerator_0/lcd_pixel_clk processing_system7_0/FCLK_CLK2
+check_pin_net generator_accelerator_0/lcd_aresetn rst_ps7_0_33M/peripheral_aresetn
+check_pin_net generator_accelerator_0/lcd_clock_locked reset_const_1/dout
+foreach lcd_port {lcd_rgb lcd_hs lcd_vs lcd_de lcd_clk lcd_rst lcd_bl} {
+    check_external_pin generator_accelerator_0/$lcd_port $lcd_port
+}
+set lcd_rgb [get_bd_ports -quiet lcd_rgb]
+if {[llength $lcd_rgb] == 1 &&
+    ([get_property LEFT $lcd_rgb] ne "23" ||
+     [get_property RIGHT $lcd_rgb] ne "0")} {
+    lappend failures "lcd_rgb external port is not 24 bits"
+}
+if {[llength [get_files -quiet *Z15_LCD_800x480.xdc]] != 1} {
+    lappend failures "Z15 LCD pin constraint file is missing"
+}
 
 foreach pin {
     accelerator_clock_wizard/clk_out1
