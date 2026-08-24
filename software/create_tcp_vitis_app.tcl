@@ -24,6 +24,8 @@ if {![file exists $patcher]} {
 set app_sources {
     accelerator.c accelerator.h
     mol_dma_protocol.h mol_dma_queue.c mol_dma_queue.h
+    mol_http_server.c mol_http_server.h
+    mol_service.c mol_service.h
     mol_tcp_protocol.c mol_tcp_protocol.h
     platform.c platform.h main_tcp_server.c
 }
