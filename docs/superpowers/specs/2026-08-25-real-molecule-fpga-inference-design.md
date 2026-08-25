@@ -24,7 +24,9 @@ Tanimoto、GNN 和 ADMET 三种硬件计算，并把可审计结果附加到候�
    - 50x50 含自环邻接矩阵，按 row-major、LSB-first 打包为 79 个 `u32`；
    - 50x64 原子特征，signed Q8.8，每个 `u32` 低 16 位在前，共 1600 words；
    - 20 个标准化 RDKit 描述符，signed Q8.8，各占一个 `u32` 的低 16 位。
-4. 后端分别发送三次批请求：Tanimoto、GNN、ADMET。
+4. 后端分别调用 Tanimoto、GNN、ADMET。已上板定位到当前共享查询 Tanimoto
+   RTL 会在 core busy 时消费但丢弃下一候选的数据，因此在修复并重烧 RTL 前，
+   Tanimoto 使用逐候选 pair 请求保证数值准确；GNN 和 ADMET 保持批请求。
 5. 将结果按候选 ID 合并到 `fpga_evaluation`，包含原始定点值、解码值、
    trace ID、批大小、延迟、执行状态和权重用途说明。
 6. Reviewer 深拷贝候选时自动保留该字段，原有 API 响应结构保持向后兼容。
