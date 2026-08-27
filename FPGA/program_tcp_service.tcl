@@ -5,8 +5,7 @@
 set script_dir [file dirname [file normalize [info script]]]
 set root_dir [file normalize [file join $script_dir ..]]
 set bit_file [file join $root_dir artifacts system_wrapper_tcp_service.bit]
-set elf_file [file join $root_dir vitis_workspace accelerator_tcp_server \
-              Release accelerator_tcp_server.elf]
+set elf_file [file join $root_dir artifacts accelerator_tcp_server.elf]
 set ps7_init_file [file join $root_dir vitis_workspace z15_tcp_platform \
                    hw ps7_init.tcl]
 

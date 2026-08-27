@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 
-// Standard one-read-port distributed memory bank.  Keeping each bank in its
-// own module lets Vivado 2019.2 infer RAM instead of expanding a 3-D array.
+// One-read-port feature bank.  Sixteen independently addressed banks preserve
+// the aggregate lanes while moving the double-buffered input store to BRAM.
 module gnn_dist_bank #(
     parameter integer WIDTH = 16,
     parameter integer DEPTH = 256,
@@ -12,11 +12,33 @@ module gnn_dist_bank #(
     input  wire [ADDR_WIDTH-1:0] waddr,
     input  wire [WIDTH-1:0]      wdata,
     input  wire [(WIDTH+7)/8-1:0] wstrb,
+    input  wire                  re,
     input  wire [ADDR_WIDTH-1:0] raddr,
     output wire [WIDTH-1:0]      rdata
 );
+`ifdef SYNTHESIS
+    xpm_memory_sdpram #(
+        .MEMORY_SIZE(WIDTH*DEPTH),
+        .MEMORY_PRIMITIVE("block"),
+        .CLOCKING_MODE("common_clock"),
+        .WRITE_DATA_WIDTH_A(WIDTH),
+        .BYTE_WRITE_WIDTH_A(8),
+        .ADDR_WIDTH_A(ADDR_WIDTH),
+        .READ_DATA_WIDTH_B(WIDTH),
+        .ADDR_WIDTH_B(ADDR_WIDTH),
+        .READ_LATENCY_B(1),
+        .WRITE_MODE_B("read_first")
+    ) memory (
+        .clka(clk), .ena(we), .wea(wstrb), .addra(waddr), .dina(wdata),
+        .clkb(clk), .enb(re), .addrb(raddr), .doutb(rdata),
+        .rstb(1'b0), .regceb(1'b1), .sleep(1'b0),
+        .injectsbiterra(1'b0), .injectdbiterra(1'b0),
+        .sbiterrb(), .dbiterrb()
+    );
+`else
     (* ram_style = "distributed" *)
     reg [WIDTH-1:0] memory [0:DEPTH-1];
+    reg [WIDTH-1:0] read_data;
     integer byte_lane;
     always @(posedge clk) begin
         if (we)
@@ -25,8 +47,59 @@ module gnn_dist_bank #(
                 if (wstrb[byte_lane])
                     memory[waddr][byte_lane*8 +: 8] <=
                         wdata[byte_lane*8 +: 8];
+        if (re)
+            read_data <= memory[raddr];
     end
-    assign rdata = memory[raddr];
+    assign rdata = read_data;
+`endif
+endmodule
+
+// One-cycle synchronous weight bank.  The synthesis path uses an explicit
+// block-memory primitive because the double-bank 512x16 memories otherwise
+// consume more distributed RAM than XC7Z015 provides.
+module gnn_weight_block_bank #(
+    parameter integer WIDTH = 16,
+    parameter integer DEPTH = 512,
+    parameter integer ADDR_WIDTH = 9
+)(
+    input  wire                  clk,
+    input  wire                  we,
+    input  wire [ADDR_WIDTH-1:0] waddr,
+    input  wire [WIDTH-1:0]      wdata,
+    input  wire                  re,
+    input  wire [ADDR_WIDTH-1:0] raddr,
+    output wire [WIDTH-1:0]      rdata
+);
+`ifdef SYNTHESIS
+    xpm_memory_sdpram #(
+        .MEMORY_SIZE(WIDTH*DEPTH),
+        .MEMORY_PRIMITIVE("block"),
+        .CLOCKING_MODE("common_clock"),
+        .WRITE_DATA_WIDTH_A(WIDTH),
+        .BYTE_WRITE_WIDTH_A(WIDTH),
+        .ADDR_WIDTH_A(ADDR_WIDTH),
+        .READ_DATA_WIDTH_B(WIDTH),
+        .ADDR_WIDTH_B(ADDR_WIDTH),
+        .READ_LATENCY_B(1),
+        .WRITE_MODE_B("read_first")
+    ) memory (
+        .clka(clk), .ena(we), .wea(we), .addra(waddr), .dina(wdata),
+        .clkb(clk), .enb(re), .addrb(raddr), .doutb(rdata),
+        .rstb(1'b0), .regceb(1'b1), .sleep(1'b0),
+        .injectsbiterra(1'b0), .injectdbiterra(1'b0),
+        .sbiterrb(), .dbiterrb()
+    );
+`else
+    reg [WIDTH-1:0] memory [0:DEPTH-1];
+    reg [WIDTH-1:0] read_data;
+    always @(posedge clk) begin
+        if (we)
+            memory[waddr] <= wdata;
+        if (re)
+            read_data <= memory[raddr];
+    end
+    assign rdata = read_data;
+`endif
 endmodule
 
 // Standard synchronous block-RAM bank for packed GNN output words.
@@ -75,6 +148,8 @@ module gnn_message_passing #(
     input  wire clk,
     input  wire rst_n,
     input  wire start,
+    input  wire input_write_bank,
+    input  wire input_run_bank,
 
     input  wire [MAX_NODES*FEATURE_DIM*DATA_WIDTH-1:0] node_features_in,
     input  wire [MAX_NODES*MAX_NODES-1:0] adjacency_in,
@@ -105,6 +180,8 @@ module gnn_message_passing #(
     input  wire weight_we,
     input  wire [$clog2(FEATURE_DIM*HIDDEN_DIM)-1:0] weight_addr,
     input  wire [DATA_WIDTH-1:0] weight_wdata,
+    input  wire cfg_bank,
+    input  wire run_bank,
     output wire busy,
     output wire valid
 );
@@ -144,8 +221,14 @@ module gnn_message_passing #(
         (MAC_FEATURE_GROUPS <= 1) ? 1 : $clog2(MAC_FEATURE_GROUPS);
     localparam integer FEATURE_BANK_ADDR_W =
         (FEATURE_BANK_DEPTH <= 1) ? 1 : $clog2(FEATURE_BANK_DEPTH);
+    localparam integer FEATURE_MEMORY_DEPTH = FEATURE_BANK_DEPTH * 2;
+    localparam integer FEATURE_MEMORY_ADDR_W =
+        (FEATURE_MEMORY_DEPTH <= 1) ? 1 : $clog2(FEATURE_MEMORY_DEPTH);
     localparam integer WEIGHT_BANK_ADDR_W =
         (WEIGHT_BANK_DEPTH <= 1) ? 1 : $clog2(WEIGHT_BANK_DEPTH);
+    localparam integer WEIGHT_MEMORY_DEPTH = WEIGHT_BANK_DEPTH * 2;
+    localparam integer WEIGHT_MEMORY_ADDR_W =
+        (WEIGHT_MEMORY_DEPTH <= 1) ? 1 : $clog2(WEIGHT_MEMORY_DEPTH);
     localparam integer OUTPUT_BANK_ADDR_W =
         (OUTPUT_BANK_DEPTH <= 1) ? 1 : $clog2(OUTPUT_BANK_DEPTH);
     localparam integer FEATURE_ELEMENT_ADDR_W =
@@ -154,6 +237,12 @@ module gnn_message_passing #(
     localparam integer ADJACENCY_ELEMENT_ADDR_W =
         (MAX_NODES*MAX_NODES <= 1)
             ? 1 : $clog2(MAX_NODES*MAX_NODES);
+    localparam integer ADJACENCY_WORD_ADDR_W =
+        (ADJACENCY_WORDS <= 1) ? 1 : $clog2(ADJACENCY_WORDS);
+    localparam integer ADJACENCY_MEMORY_DEPTH = ADJACENCY_WORDS * 2;
+    localparam integer ADJACENCY_MEMORY_ADDR_W =
+        (ADJACENCY_MEMORY_DEPTH <= 1) ? 1 :
+        $clog2(ADJACENCY_MEMORY_DEPTH);
     localparam integer OUTPUT_BANK_IDX_W =
         (OUTPUT_BANKS <= 1) ? 1 : $clog2(OUTPUT_BANKS);
     localparam integer AGG_WIDTH = DATA_WIDTH +
@@ -198,9 +287,13 @@ module gnn_message_passing #(
 
     reg [NODE_IDX_W-1:0] aggregate_neighbor_issue;
     reg [AGG_GROUP_W-1:0] aggregate_group_issue;
-    wire [FEATURE_BANK_ADDR_W-1:0] feature_read_addr =
+    wire [FEATURE_BANK_ADDR_W-1:0] feature_read_logical_addr =
         aggregate_neighbor_issue*AGG_GROUPS + aggregate_group_issue;
+    wire [FEATURE_MEMORY_ADDR_W-1:0] feature_read_addr =
+        feature_read_logical_addr +
+        (active_input_bank ? FEATURE_BANK_DEPTH : 0);
     wire [AGG_LANES*DATA_WIDTH-1:0] feature_bank_rdata_bus;
+    reg aggregate_all_issued;
 
     genvar feature_bank;
     generate
@@ -211,24 +304,29 @@ module gnn_message_passing #(
             wire select_high =
                 (feature_load_index1 % AGG_LANES) == feature_bank &&
                 feature_load_element1 < MAX_NODES*FEATURE_DIM;
-            wire bank_we = feature_we && state == ST_IDLE &&
+            wire bank_we = feature_we &&
+                (state == ST_IDLE || input_write_bank != active_input_bank) &&
                 (select_low || select_high);
-            wire [FEATURE_BANK_ADDR_W-1:0] bank_waddr =
+            wire [FEATURE_BANK_ADDR_W-1:0] bank_logical_waddr =
                 select_low ? feature_write_addr0 : feature_write_addr1;
+            wire [FEATURE_MEMORY_ADDR_W-1:0] bank_waddr =
+                bank_logical_waddr +
+                (input_write_bank ? FEATURE_BANK_DEPTH : 0);
             wire [DATA_WIDTH-1:0] bank_wdata =
                 select_low ? feature_wdata[15:0] : feature_wdata[31:16];
             wire [1:0] bank_wstrb =
                 select_low ? feature_wstrb[1:0] : feature_wstrb[3:2];
             gnn_dist_bank #(
                 .WIDTH(DATA_WIDTH),
-                .DEPTH(FEATURE_BANK_DEPTH),
-                .ADDR_WIDTH(FEATURE_BANK_ADDR_W)
+                .DEPTH(FEATURE_MEMORY_DEPTH),
+                .ADDR_WIDTH(FEATURE_MEMORY_ADDR_W)
             ) bank (
                 .clk(clk),
                 .we(bank_we),
                 .waddr(bank_waddr),
                 .wdata(bank_wdata),
                 .wstrb(bank_wstrb),
+                .re((state == ST_AGG_RUN) && !aggregate_all_issued),
                 .raddr(feature_read_addr),
                 .rdata(feature_bank_rdata_bus[
                     feature_bank*DATA_WIDTH +: DATA_WIDTH])
@@ -236,15 +334,20 @@ module gnn_message_passing #(
         end
     endgenerate
 
+    reg active_input_bank;
     (* ram_style = "distributed" *)
-    reg [31:0] adjacency_memory [0:ADJACENCY_WORDS-1];
+    reg [31:0] adjacency_memory [0:ADJACENCY_MEMORY_DEPTH-1];
+    wire [ADJACENCY_MEMORY_ADDR_W-1:0] adjacency_write_addr =
+        adjacency_word_addr +
+        (input_write_bank ? ADJACENCY_WORDS : 0);
     integer adjacency_byte_lane;
     always @(posedge clk) begin
-        if (adjacency_we && state == ST_IDLE)
+        if (adjacency_we &&
+            (state == ST_IDLE || input_write_bank != active_input_bank))
             for (adjacency_byte_lane = 0; adjacency_byte_lane < 4;
                  adjacency_byte_lane = adjacency_byte_lane + 1)
                 if (adjacency_wstrb[adjacency_byte_lane])
-                    adjacency_memory[adjacency_word_addr]
+                    adjacency_memory[adjacency_write_addr]
                         [adjacency_byte_lane*8 +: 8] <=
                             adjacency_wdata[adjacency_byte_lane*8 +: 8];
     end
@@ -257,14 +360,19 @@ module gnn_message_passing #(
         weight_load_hidden / HID_LANES;
     wire [MAC_FEATURE_GROUP_W-1:0] weight_load_feature_group =
         weight_load_feature / MAC_FEAT_LANES;
-    wire [WEIGHT_BANK_ADDR_W-1:0] weight_write_addr =
-        weight_load_hidden_group*MAC_FEATURE_GROUPS +
-        weight_load_feature_group;
+    wire [WEIGHT_BANK_ADDR_W-1:0] weight_write_logical_addr =
+        weight_load_hidden_group*MAC_FEATURE_GROUPS + weight_load_feature_group;
+    wire [WEIGHT_MEMORY_ADDR_W-1:0] weight_write_addr =
+        weight_write_logical_addr + (cfg_bank ? WEIGHT_BANK_DEPTH : 0);
 
     reg [MAC_FEATURE_GROUP_W-1:0] mac_feature_group_issue;
-    wire [WEIGHT_BANK_ADDR_W-1:0] weight_read_addr =
+    wire [WEIGHT_BANK_ADDR_W-1:0] weight_read_logical_addr =
         hidden_group_idx*MAC_FEATURE_GROUPS + mac_feature_group_issue;
+    wire [WEIGHT_MEMORY_ADDR_W-1:0] weight_read_addr =
+        weight_read_logical_addr +
+        (active_weight_bank ? WEIGHT_BANK_DEPTH : 0);
     wire [TOTAL_MAC_BANKS*DATA_WIDTH-1:0] weight_bank_rdata_bus;
+    reg mac_all_issued;
 
     genvar weight_bank;
     generate
@@ -274,19 +382,20 @@ module gnn_message_passing #(
                 weight_bank / MAC_FEAT_LANES;
             localparam integer THIS_FEATURE_LANE =
                 weight_bank % MAC_FEAT_LANES;
-            wire bank_we = weight_we && state == ST_IDLE &&
+            wire bank_we = weight_we &&
+                (state == ST_IDLE || cfg_bank != active_weight_bank) &&
                 (weight_load_hidden % HID_LANES) == THIS_HIDDEN_LANE &&
                 (weight_load_feature % MAC_FEAT_LANES) == THIS_FEATURE_LANE;
-            gnn_dist_bank #(
+            gnn_weight_block_bank #(
                 .WIDTH(DATA_WIDTH),
-                .DEPTH(WEIGHT_BANK_DEPTH),
-                .ADDR_WIDTH(WEIGHT_BANK_ADDR_W)
+                .DEPTH(WEIGHT_MEMORY_DEPTH),
+                .ADDR_WIDTH(WEIGHT_MEMORY_ADDR_W)
             ) bank (
                 .clk(clk),
                 .we(bank_we),
                 .waddr(weight_write_addr),
                 .wdata(weight_wdata),
-                .wstrb({(DATA_WIDTH+7)/8{1'b1}}),
+                .re((state == ST_MAC_RUN) && !mac_all_issued),
                 .raddr(weight_read_addr),
                 .rdata(weight_bank_rdata_bus[
                     weight_bank*DATA_WIDTH +: DATA_WIDTH])
@@ -294,21 +403,30 @@ module gnn_message_passing #(
         end
     endgenerate
 
+    reg active_weight_bank;
     reg signed [AGG_WIDTH-1:0] aggregate_feature [0:FEATURE_DIM-1];
-    reg aggregate_all_issued;
+    reg aggregate_memory_valid;
+    reg aggregate_memory_adjacency;
+    reg [AGG_GROUP_W-1:0] aggregate_memory_group;
     reg aggregate_read_valid;
     reg aggregate_read_adjacency;
     reg [AGG_GROUP_W-1:0] aggregate_read_group;
     reg [AGG_LANES*DATA_WIDTH-1:0] aggregate_feature_read_bus;
     wire [ADJACENCY_ELEMENT_ADDR_W-1:0] aggregate_adjacency_element =
         node_idx*MAX_NODES + aggregate_neighbor_issue;
+    wire [ADJACENCY_WORD_ADDR_W-1:0] aggregate_adjacency_word =
+        aggregate_adjacency_element / 32;
+    wire [ADJACENCY_MEMORY_ADDR_W-1:0] aggregate_adjacency_addr =
+        aggregate_adjacency_word +
+        (active_input_bank ? ADJACENCY_WORDS : 0);
     wire aggregate_issue_adjacency =
-        adjacency_memory[aggregate_adjacency_element / 32]
+        adjacency_memory[aggregate_adjacency_addr]
             [aggregate_adjacency_element % 32];
 
-    reg mac_all_issued;
+    reg mac_memory_valid;
     reg mac_read_valid;
     reg mac_product_valid;
+    reg [MAC_FEAT_LANES*AGG_WIDTH-1:0] mac_aggregate_issue_bus;
     reg [TOTAL_MAC_BANKS*DATA_WIDTH-1:0] mac_weight_read_bus;
     reg [MAC_FEAT_LANES*AGG_WIDTH-1:0] mac_aggregate_read_bus;
     reg [TOTAL_MAC_BANKS*PRODUCT_WIDTH-1:0] mac_product_bus;
@@ -431,16 +549,22 @@ module gnn_message_passing #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state                    <= ST_IDLE;
+            active_input_bank        <= 1'b0;
+            active_weight_bank       <= 1'b0;
             node_idx                 <= {NODE_IDX_W{1'b0}};
             hidden_group_idx         <= {HIDDEN_GROUP_W{1'b0}};
             aggregate_neighbor_issue <= {NODE_IDX_W{1'b0}};
             aggregate_group_issue    <= {AGG_GROUP_W{1'b0}};
             aggregate_all_issued     <= 1'b0;
+            aggregate_memory_valid    <= 1'b0;
+            aggregate_memory_adjacency <= 1'b0;
+            aggregate_memory_group    <= {AGG_GROUP_W{1'b0}};
             aggregate_read_valid     <= 1'b0;
             aggregate_read_adjacency <= 1'b0;
             aggregate_read_group     <= {AGG_GROUP_W{1'b0}};
             mac_feature_group_issue  <= {MAC_FEATURE_GROUP_W{1'b0}};
             mac_all_issued           <= 1'b0;
+            mac_memory_valid         <= 1'b0;
             mac_read_valid           <= 1'b0;
             mac_product_valid        <= 1'b0;
             for (clear_feature = 0; clear_feature < FEATURE_DIM;
@@ -453,6 +577,8 @@ module gnn_message_passing #(
             case (state)
                 ST_IDLE: begin
                     if (start) begin
+                        active_input_bank <= input_run_bank;
+                        active_weight_bank <= run_bank;
                         node_idx         <= {NODE_IDX_W{1'b0}};
                         hidden_group_idx <= {HIDDEN_GROUP_W{1'b0}};
                         state            <= ST_CLEAR_AGG;
@@ -467,6 +593,7 @@ module gnn_message_passing #(
                     aggregate_neighbor_issue <= {NODE_IDX_W{1'b0}};
                     aggregate_group_issue    <= {AGG_GROUP_W{1'b0}};
                     aggregate_all_issued     <= 1'b0;
+                    aggregate_memory_valid    <= 1'b0;
                     aggregate_read_valid     <= 1'b0;
                     state                    <= ST_AGG_RUN;
                 end
@@ -487,12 +614,21 @@ module gnn_message_passing #(
                                 ] + $signed(aggregate_feature_read_bus[
                                     aggregate_lane*DATA_WIDTH +: DATA_WIDTH]);
 
-                    if (!aggregate_all_issued) begin
+                    if (aggregate_memory_valid) begin
                         aggregate_feature_read_bus <= feature_bank_rdata_bus;
-                        aggregate_read_group <= aggregate_group_issue;
+                        aggregate_read_group <= aggregate_memory_group;
                         aggregate_read_adjacency <=
-                            aggregate_issue_adjacency;
+                            aggregate_memory_adjacency;
                         aggregate_read_valid <= 1'b1;
+                    end else begin
+                        aggregate_read_valid <= 1'b0;
+                    end
+
+                    if (!aggregate_all_issued) begin
+                        aggregate_memory_group <= aggregate_group_issue;
+                        aggregate_memory_adjacency <=
+                            aggregate_issue_adjacency;
+                        aggregate_memory_valid <= 1'b1;
                         if (aggregate_group_issue == AGG_GROUPS-1) begin
                             aggregate_group_issue <= {AGG_GROUP_W{1'b0}};
                             if (aggregate_neighbor_issue == MAX_NODES-1)
@@ -504,9 +640,12 @@ module gnn_message_passing #(
                             aggregate_group_issue <=
                                 aggregate_group_issue + 1'b1;
                         end
-                    end else if (aggregate_read_valid) begin
-                        aggregate_read_valid <= 1'b0;
                     end else begin
+                        aggregate_memory_valid <= 1'b0;
+                    end
+
+                    if (aggregate_all_issued && !aggregate_memory_valid &&
+                        !aggregate_read_valid) begin
                         hidden_group_idx <= {HIDDEN_GROUP_W{1'b0}};
                         state <= ST_MAC_INIT;
                     end
@@ -516,6 +655,7 @@ module gnn_message_passing #(
                     mac_feature_group_issue <=
                         {MAC_FEATURE_GROUP_W{1'b0}};
                     mac_all_issued    <= 1'b0;
+                    mac_memory_valid  <= 1'b0;
                     mac_read_valid    <= 1'b0;
                     mac_product_valid <= 1'b0;
                     for (hidden_lane = 0; hidden_lane < HID_LANES;
@@ -527,28 +667,35 @@ module gnn_message_passing #(
 
                 ST_MAC_RUN: begin
                     if (!mac_all_issued) begin
-                        mac_weight_read_bus <= weight_bank_rdata_bus;
                         for (mac_feature_lane = 0;
                              mac_feature_lane < MAC_FEAT_LANES;
                              mac_feature_lane = mac_feature_lane + 1)
                             if (mac_feature_group_issue*MAC_FEAT_LANES +
                                 mac_feature_lane < FEATURE_DIM)
-                                mac_aggregate_read_bus[
+                                mac_aggregate_issue_bus[
                                     mac_feature_lane*AGG_WIDTH +: AGG_WIDTH] <=
                                     aggregate_feature[
                                         mac_feature_group_issue*
                                         MAC_FEAT_LANES + mac_feature_lane];
                             else
-                                mac_aggregate_read_bus[
+                                mac_aggregate_issue_bus[
                                     mac_feature_lane*AGG_WIDTH +: AGG_WIDTH] <=
                                     {AGG_WIDTH{1'b0}};
-                        mac_read_valid <= 1'b1;
+                        mac_memory_valid <= 1'b1;
                         if (mac_feature_group_issue ==
                             MAC_FEATURE_GROUPS-1)
                             mac_all_issued <= 1'b1;
                         else
                             mac_feature_group_issue <=
                                 mac_feature_group_issue + 1'b1;
+                    end else begin
+                        mac_memory_valid <= 1'b0;
+                    end
+
+                    if (mac_memory_valid) begin
+                        mac_weight_read_bus <= weight_bank_rdata_bus;
+                        mac_aggregate_read_bus <= mac_aggregate_issue_bus;
+                        mac_read_valid <= 1'b1;
                     end else begin
                         mac_read_valid <= 1'b0;
                     end
@@ -575,7 +722,8 @@ module gnn_message_passing #(
                                 mac_accumulator[hidden_lane] +
                                 mac_increment[hidden_lane];
 
-                    if (mac_all_issued && !mac_read_valid &&
+                    if (mac_all_issued && !mac_memory_valid &&
+                        !mac_read_valid &&
                         !mac_product_valid)
                         state <= ST_MAC_WRITE;
                 end

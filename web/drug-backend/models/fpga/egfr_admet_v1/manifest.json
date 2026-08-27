@@ -1,0 +1,231 @@
+{
+  "datasets": {
+    "bbb_permeability": {
+      "dataset": "BBB_Martins",
+      "source": "Therapeutics Data Commons"
+    },
+    "egfr_activity": {
+      "source": "ChEMBL REST API",
+      "target": "CHEMBL203"
+    },
+    "herg_block_risk": {
+      "dataset": "hERG",
+      "source": "Therapeutics Data Commons"
+    },
+    "lipophilicity_desirability": {
+      "dataset": "Lipophilicity_AstraZeneca",
+      "source": "Therapeutics Data Commons"
+    },
+    "oral_bioavailability": {
+      "dataset": "Bioavailability_Ma",
+      "source": "Therapeutics Data Commons"
+    }
+  },
+  "descriptors": [
+    {
+      "center": 372.9178041059,
+      "name": "MolWt",
+      "scale": 127.6715508183
+    },
+    {
+      "center": 2.9018002187,
+      "name": "MolLogP",
+      "scale": 1.7832103408
+    },
+    {
+      "center": 76.043752878,
+      "name": "TPSA",
+      "scale": 44.8272094087
+    },
+    {
+      "center": 4.7056792018,
+      "name": "NumHAcceptors",
+      "scale": 2.6111702863
+    },
+    {
+      "center": 1.628933231,
+      "name": "NumHDonors",
+      "scale": 1.4780536291
+    },
+    {
+      "center": 4.9144282425,
+      "name": "NumRotatableBonds",
+      "scale": 3.0556941737
+    },
+    {
+      "center": 3.365886416,
+      "name": "RingCount",
+      "scale": 1.3439023061
+    },
+    {
+      "center": 2.1866845741,
+      "name": "NumAromaticRings",
+      "scale": 1.1538713168
+    },
+    {
+      "center": 0.3722992046,
+      "name": "FractionCSP3",
+      "scale": 0.2187072004
+    },
+    {
+      "center": 26.2478894858,
+      "name": "HeavyAtomCount",
+      "scale": 8.974421386
+    },
+    {
+      "center": 1.8716423638,
+      "name": "NHOHCount",
+      "scale": 1.7665525014
+    },
+    {
+      "center": 5.7691864927,
+      "name": "NOCount",
+      "scale": 2.9847826946
+    },
+    {
+      "center": 1.1792018419,
+      "name": "NumAliphaticRings",
+      "scale": 1.2773955329
+    },
+    {
+      "center": 0.8490023024,
+      "name": "NumSaturatedRings",
+      "scale": 1.0702640966
+    },
+    {
+      "center": 1.8380659031,
+      "name": "BalabanJ",
+      "scale": 0.5628108164
+    },
+    {
+      "center": 868.1105104654,
+      "name": "BertzCT",
+      "scale": 375.2996124233
+    },
+    {
+      "center": 100.7331274175,
+      "name": "MolMR",
+      "scale": 33.1534368068
+    },
+    {
+      "center": 155.9868484325,
+      "name": "LabuteASA",
+      "scale": 52.308294762
+    },
+    {
+      "center": 0.2612206686,
+      "name": "MaxPartialCharge",
+      "scale": 0.1249183197
+    },
+    {
+      "center": -0.4237066059,
+      "name": "MinPartialCharge",
+      "scale": 0.0930874971
+    }
+  ],
+  "fixed_point": {
+    "acceptance_limit": 0.02,
+    "format": "signed Q8.8",
+    "max_float_vs_q8_probability_drift": 0.011185,
+    "per_model_drift": {
+      "bbb_permeability": 0.011185,
+      "egfr_activity": 0.000897,
+      "herg_block_risk": 0.006456,
+      "lipophilicity_desirability": 0.010657,
+      "oral_bioavailability": 0.00794
+    },
+    "rounding": "round-to-nearest during packing; RTL arithmetic shifts",
+    "sigmoid": "RTL piecewise-linear knots -8,-4,-2,-1,0,1,2,4,8"
+  },
+  "generated_on": "2026-08-26",
+  "limitations": "Compact public-data model for FPGA ranking research; not for clinical use.",
+  "outputs": {
+    "admet": [
+      "lipophilicity_desirability",
+      "oral_bioavailability",
+      "herg_block_risk",
+      "bbb_permeability"
+    ],
+    "gnn": [
+      "egfr_activity_score",
+      "egfr_activity_trace"
+    ]
+  },
+  "profile": "egfr_admet_v1",
+  "schema_version": 1,
+  "target": {
+    "activity_transform": "pChEMBL mapped as clip((value-5)/4, 0, 1)",
+    "chembl_id": "CHEMBL203",
+    "name": "EGFR",
+    "reference_name": "gefitinib",
+    "reference_smiles": "COc1cc2ncnc(Nc3ccc(F)c(Cl)c3)c2cc1OCCCN1CCOCC1"
+  },
+  "target_transforms": {
+    "bbb_permeability": "binary label",
+    "egfr_activity": "clip((pChEMBL-5)/4, 0, 1)",
+    "herg_block_risk": "binary label",
+    "lipophilicity_desirability": "1-|logP-2.5|/4 clipped to [0,1]",
+    "oral_bioavailability": "binary label"
+  },
+  "training": {
+    "held_out_metrics": {
+      "bbb_permeability": {
+        "auroc": 0.855221,
+        "balanced_accuracy": 0.768268
+      },
+      "egfr_activity": {
+        "mae": 0.221952,
+        "rmse": 0.270474
+      },
+      "herg_block_risk": {
+        "auroc": 0.831478,
+        "balanced_accuracy": 0.731602
+      },
+      "lipophilicity_desirability": {
+        "mae": 0.252277,
+        "rmse": 0.284552
+      },
+      "oral_bioavailability": {
+        "auroc": 0.552545,
+        "balanced_accuracy": 0.568044
+      }
+    },
+    "seed": 20260826,
+    "split": "deterministic Bemis-Murcko scaffold 70/10/20",
+    "split_counts": {
+      "bbb_permeability": {
+        "test": 493,
+        "train": 1385,
+        "validation": 161
+      },
+      "egfr_activity": {
+        "test": 2050,
+        "train": 7524,
+        "validation": 1329
+      },
+      "herg_block_risk": {
+        "test": 131,
+        "train": 457,
+        "validation": 66
+      },
+      "lipophilicity_desirability": {
+        "test": 839,
+        "train": 2937,
+        "validation": 423
+      },
+      "oral_bioavailability": {
+        "test": 156,
+        "train": 433,
+        "validation": 50
+      }
+    }
+  },
+  "validated": true,
+  "weights": {
+    "bytes": 18152,
+    "crc32": "f6a8fd53",
+    "encoding": "signed Q8.8 little-endian halfwords, low halfword first",
+    "file": "weights.bin",
+    "halfwords": 9076
+  }
+}

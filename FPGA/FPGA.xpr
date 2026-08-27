@@ -75,8 +75,8 @@
         <CompFileExtendedInfo CompFileName="system.bd" FileRelPathName="ip/system_ps_axi3_lite_bridge_0_0/system_ps_axi3_lite_bridge_0_0.xci">
           <Proxy FileSetName="system_ps_axi3_lite_bridge_0_0"/>
         </CompFileExtendedInfo>
-        <CompFileExtendedInfo CompFileName="system.bd" FileRelPathName="ip/system_generator_accelerator_0_9/system_generator_accelerator_0_9.xci">
-          <Proxy FileSetName="system_generator_accelerator_0_9"/>
+        <CompFileExtendedInfo CompFileName="system.bd" FileRelPathName="ip/system_generator_accelerator_0_33/system_generator_accelerator_0_33.xci">
+          <Proxy FileSetName="system_generator_accelerator_0_33"/>
         </CompFileExtendedInfo>
       </File>
       <File Path="$PSRCDIR/sources_1/bd/system/hdl/system_wrapper.v">
@@ -136,6 +136,12 @@
     </FileSet>
     <FileSet Name="constrs_1" Type="Constrs" RelSrcDir="$PSRCDIR/constrs_1">
       <Filter Type="Constrs"/>
+      <File Path="$PPRDIR/../constraints/Z15_LCD_800x480.xdc">
+        <FileInfo>
+          <Attr Name="UsedIn" Val="synthesis"/>
+          <Attr Name="UsedIn" Val="implementation"/>
+        </FileInfo>
+      </File>
       <Config>
         <Option Name="ConstrsType" Val="XDC"/>
       </Config>
@@ -165,9 +171,9 @@
         <Option Name="UseBlackboxStub" Val="1"/>
       </Config>
     </FileSet>
-    <FileSet Name="system_generator_accelerator_0_9" Type="BlockSrcs" RelSrcDir="$PSRCDIR/system_generator_accelerator_0_9">
+    <FileSet Name="system_generator_accelerator_0_33" Type="BlockSrcs" RelSrcDir="$PSRCDIR/system_generator_accelerator_0_33">
       <Config>
-        <Option Name="TopModule" Val="system_generator_accelerator_0_9"/>
+        <Option Name="TopModule" Val="system_generator_accelerator_0_33"/>
         <Option Name="UseBlackboxStub" Val="1"/>
       </Config>
     </FileSet>
@@ -211,11 +217,9 @@
       <Report Name="ROUTE_DESIGN.REPORT_METHODOLOGY" Enabled="1"/>
       <RQSFiles/>
     </Run>
-    <Run Id="system_generator_accelerator_0_9_synth_1" Type="Ft3:Synth" SrcSet="system_generator_accelerator_0_9" Part="xc7z015clg485-2" ConstrsSet="system_generator_accelerator_0_9" Description="Vivado Synthesis Defaults" AutoIncrementalCheckpoint="false" WriteIncrSynthDcp="false" Dir="$PRUNDIR/system_generator_accelerator_0_9_synth_1" IncludeInArchive="true">
+    <Run Id="system_generator_accelerator_0_33_synth_1" Type="Ft3:Synth" SrcSet="system_generator_accelerator_0_33" Part="xc7z015clg485-2" ConstrsSet="system_generator_accelerator_0_33" Description="Vivado Synthesis Defaults" AutoIncrementalCheckpoint="false" WriteIncrSynthDcp="false" Dir="$PRUNDIR/system_generator_accelerator_0_33_synth_1" IncludeInArchive="true">
       <Strategy Version="1" Minor="2">
-        <StratHandle Name="Vivado Synthesis Defaults" Flow="Vivado Synthesis 2019">
-          <Desc>Vivado Synthesis Defaults</Desc>
-        </StratHandle>
+        <StratHandle Name="Vivado Synthesis Defaults" Flow="Vivado Synthesis 2019"/>
         <Step Id="synth_design"/>
       </Strategy>
       <GeneratedRun Dir="$PRUNDIR" File="gen_run.xml"/>
@@ -228,10 +232,11 @@
         <StratHandle Name="Performance_ExplorePostRoutePhysOpt" Flow="Vivado Implementation 2019"/>
         <Step Id="init_design"/>
         <Step Id="opt_design">
-          <Option Id="Directive">0</Option>
+          <Option Id="Directive">5</Option>
         </Step>
         <Step Id="power_opt_design"/>
         <Step Id="place_design">
+          <Option Id="MoreOptsStr"><![CDATA[-no_psip]]></Option>
           <Option Id="Directive">0</Option>
         </Step>
         <Step Id="post_place_power_opt_design"/>
@@ -269,11 +274,9 @@
       <Report Name="ROUTE_DESIGN.REPORT_METHODOLOGY" Enabled="1"/>
       <RQSFiles/>
     </Run>
-    <Run Id="system_generator_accelerator_0_9_impl_1" Type="Ft2:EntireDesign" Part="xc7z015clg485-2" ConstrsSet="system_generator_accelerator_0_9" Description="Default settings for Implementation." AutoIncrementalCheckpoint="false" WriteIncrSynthDcp="false" SynthRun="system_generator_accelerator_0_9_synth_1" IncludeInArchive="false" GenFullBitstream="true">
+    <Run Id="system_generator_accelerator_0_33_impl_1" Type="Ft2:EntireDesign" Part="xc7z015clg485-2" ConstrsSet="system_generator_accelerator_0_33" Description="Default settings for Implementation." AutoIncrementalCheckpoint="false" WriteIncrSynthDcp="false" SynthRun="system_generator_accelerator_0_33_synth_1" IncludeInArchive="false" GenFullBitstream="true">
       <Strategy Version="1" Minor="2">
-        <StratHandle Name="Vivado Implementation Defaults" Flow="Vivado Implementation 2019">
-          <Desc>Default settings for Implementation.</Desc>
-        </StratHandle>
+        <StratHandle Name="Vivado Implementation Defaults" Flow="Vivado Implementation 2019"/>
         <Step Id="init_design"/>
         <Step Id="opt_design"/>
         <Step Id="power_opt_design"/>

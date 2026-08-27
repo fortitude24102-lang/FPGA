@@ -1,10 +1,10 @@
 # Z15 分子计算 FPGA 加速器
 
-本仓库实现 MolRecommender 项目的 Zynq-7015 硬件加速核心，覆盖
+本仓库实现 MolRecommender 项目的完整演示系统及 Zynq-7015 硬件加速核心，覆盖
 Tanimoto 分子指纹相似度、GNN 消息传递、四路 ADMET 全连接网络以及
 Tanimoto → GNN → ADMET 流水线。最终版本在原 AXI4-Lite 控制面之外加入
 AXI DMA、128-bit AXI4-Stream、HP0 突发传输和混合任务批处理，并完成
-RTL、软件、实现报告及 Z15 实板闭环验证。
+RTL、板端软件、Web 前后端、实现报告及 Z15 实板闭环验证。
 
 ## 最终验收结果
 
@@ -29,13 +29,18 @@ Pipeline default/intermediate/full、0/1/2/3 混合批次、continue/stop-on-err
 任务超时、DMA reset recovery 和 1,000 批压力测试。完整串口证据见
 [`reports/dma_batch/board-results.txt`](reports/dma_batch/board-results.txt)。
 
-实现结果满足正时与资源门禁：100 MHz WNS/WHS 为 `+0.012/+0.010 ns`，
+DMA 性能基线实现满足正时与资源门禁：100 MHz WNS/WHS 为 `+0.012/+0.010 ns`，
 150 MHz WNS/WHS 为 `+0.460/+0.060 ns`，无未布线网络、DRC Error 或
 Methodology Error；使用 31,133 LUT、16,707 FF、21 BRAM、78 DSP48。
 
+8 月 24 日的 TCP/LCD 演示版加入千兆网服务、800×480 状态面板和运行时
+50/100/150 MHz 展示档位，实板功能可用；该高资源版本的实现报告记录全局
+WNS `-2.987 ns`，因此不把它表述为时序收敛版本。完整证据见
+[`reports/tcp_service/`](reports/tcp_service/)。
+
 ## 验证覆盖
 
-- 23 个自检式 RTL testbench 全部通过。
+- 31 个自检式 RTL testbench 全部通过。
 - DMA 协议代码生成一致性检查通过。
 - 7 个 PS 端数据布局与边界条件软件测试通过。
 - Vivado 实现报告自动门禁通过。
@@ -62,6 +67,7 @@ python FPGA/check_dma_reports.py reports/dma_batch/impl
 | `protocol/` | DMA 请求/响应协议唯一事实源及生成结果 |
 | `sim/` | 23 个 SystemVerilog testbench、一键回归和协议检查 |
 | `software/` | Vitis/Standalone 驱动、包构造器、结果解析器和实板测试 |
+| `web/` | MolRecommender 后端与原始前端源码，不包含依赖、运行数据或密钥 |
 | `FPGA/` | Vivado 2019.2 工程、BD、XCI 与可复现 Tcl |
 | `ip_repo/` | 自定义加速器 IP 打包源 |
 | `constraints/` | 顶层时序约束；板级约束随 IP 源保存 |
@@ -111,6 +117,32 @@ source D:/FPGA/software/create_dma_vitis_app.tcl
   'D:\FPGA\FPGA\program_dma_batch.tcl'
 ```
 
+运行带 TCP 服务和 LCD 面板的演示版本：
+
+```powershell
+& 'D:\visit\Vitis\2019.2\bin\xsct.bat' `
+  'D:\FPGA\FPGA\program_tcp_service.tcl'
+```
+
+## Web 前后端
+
+首次运行分别安装依赖，之后启动后端和前端：
+
+```powershell
+cd D:\FPGA\web\drug-backend
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item .env.example .env
+.\venv\Scripts\python.exe main.py
+
+cd D:\FPGA\web\molrecommender-frontend
+npm install
+npm run dev
+```
+
+默认访问地址为 `http://localhost:5173`。后端通过 `.env` 中的
+`FPGA_SERVICE_URL` 连接板端服务；真实 `.env`、依赖和运行数据不会提交。
+
 ## 正式交付物
 
 - [`artifacts/system_wrapper_dma_batch.bit`](artifacts/system_wrapper_dma_batch.bit)
@@ -119,14 +151,23 @@ source D:/FPGA/software/create_dma_vitis_app.tcl
 - [`artifacts/system_wrapper_dma_batch.xsa`](artifacts/system_wrapper_dma_batch.xsa)
 
   SHA-256: `736397FA243D1A30CBDAD151C1C3CFA19A0B0D1168BA68FE027A55ABFDEB6A61`
+- [`artifacts/system_wrapper_tcp_service.bit`](artifacts/system_wrapper_tcp_service.bit)
+
+  SHA-256: `0C3295594B829BA4A27F64B2018CCB0AF7B0AC0DC4302D196FBA6BDE93403B16`
+- [`artifacts/system_wrapper_tcp_service.xsa`](artifacts/system_wrapper_tcp_service.xsa)
+
+  SHA-256: `216CF05CBCC1D559DCCDD8B143B469442517B27C7952605EC85975C4E211FB0D`
+- [`artifacts/accelerator_tcp_server.elf`](artifacts/accelerator_tcp_server.elf)
+
+  SHA-256: `9DA0B265DDF6D8A2B0BB18A50F9C6F255D2CD908CBF36CB7D720CCB7E878F5F4`
 - [`reports/Z15_FPGA项目验收与测试报告_20260811_DMA最终版.docx`](reports/Z15_FPGA项目验收与测试报告_20260811_DMA最终版.docx)
 
-发布哈希清单见
-[`reports/dma_batch/release-hashes.sha256`](reports/dma_batch/release-hashes.sha256)。
+发布哈希清单分别见
+[`reports/dma_batch/release-hashes.sha256`](reports/dma_batch/release-hashes.sha256) 和
+[`reports/tcp_service/release-hashes.sha256`](reports/tcp_service/release-hashes.sha256)。
 
 ## 本地生成目录
 
 `.Xil/`、`FPGA/FPGA.cache/`、`FPGA/FPGA.hw/`、`FPGA/FPGA.runs/`、
 `FPGA/FPGA.sim/`、生成的 BD 子目录和 `vitis_workspace/` 均保留在本机，
-但由 `.gitignore` 排除。整理前的历史调试文件位于本机
-`_local/archive/<原相对路径>/`；该目录同样不会上传。
+但由 `.gitignore` 排除。依赖、缓存、日志、候选构建和临时渲染结果同样不会上传。

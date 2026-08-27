@@ -647,10 +647,16 @@ static int execute_dma_task(uint8_t task_id, uint32_t trace_id,
     rc = mol_dma_builder_init(&builder, dma_tx, sizeof(dma_tx), batch_id,
                               0U, MOL_DMA_MAX_TRANSFER_WORDS);
     if (rc == MOL_DMA_OK) {
-        rc = mol_dma_builder_add_task(
-            &builder, trace_id, task_id, dma_flags, batch_size, trace_id,
-            MOL_DMA_TASK_TIMEOUT_CYCLES, payload, payload_words,
-            result_words);
+        if (task_id == MOL_DMA_TASK_WEIGHT_RELOAD) {
+            rc = mol_dma_builder_add_weight_reload(
+                &builder, trace_id, payload, payload_words,
+                MOL_DMA_TASK_TIMEOUT_CYCLES);
+        } else {
+            rc = mol_dma_builder_add_task(
+                &builder, trace_id, task_id, dma_flags, batch_size, trace_id,
+                MOL_DMA_TASK_TIMEOUT_CYCLES, payload, payload_words,
+                result_words);
+        }
     }
     if (rc == MOL_DMA_OK) {
         rc = mol_dma_builder_finalize(&builder, &tx_bytes);

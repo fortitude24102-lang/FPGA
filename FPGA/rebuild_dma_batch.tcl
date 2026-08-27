@@ -92,7 +92,8 @@ foreach name {
     admet_predictor.v fc_network.v gnn_message_passing.v
     tanimoto_accelerator.v tanimoto_stream_batch.v
     dma_task_queue_frontend.v dma_task_queue.v dma_result_formatter.v
-    dma_accelerator_backend.v generator_accelerator_top.v mol_dma_protocol.vh
+    dma_accelerator_backend.v lcd_status_display.v
+    generator_accelerator_top.v mol_dma_protocol.vh
 } {
     set tracked [file join $root_dir rtl $name]
     set packaged [file join $root_dir ip_repo generator_accelerator_1_0 src $name]

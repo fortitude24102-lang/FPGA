@@ -7,6 +7,11 @@
 #define MOL_SENSOR_INTERVAL_SECONDS 1U
 #define MOL_WATCHDOG_KICK_SECONDS 1U
 #define MOL_MAX_TEMPERATURE_Q8_8 (80U << 8)
+#define MOL_TANIMOTO_CORE_SPEEDUP_Q8_8 (120U << 8)
+
+static const uint32_t cpu_us_per_item[4] = {6U, 13471U, 32U, 13509U};
+static const uint32_t measured_items[4] = {64U, 2U, 64U, 3U};
+static const uint32_t measured_fpga_us[4] = {33U, 797U, 99U, 1088U};
 
 #define LCD_STATUS_OFFSET 0x500U
 #define LCD_TEMP_OFFSET 0x504U
@@ -33,6 +38,16 @@ static uint8_t display_task(uint8_t task_id)
            task_id <= 3U ? task_id : MOL_SERVICE_TASK_NONE;
 }
 
+static uint16_t ratio_q8_8(uint32_t cpu_us, uint32_t fpga_us)
+{
+    uint64_t value;
+    if (fpga_us == 0U) {
+        return 0U;
+    }
+    value = ((uint64_t)cpu_us * 256U + fpga_us/2U) / fpga_us;
+    return value > 0xffffU ? 0xffffU : (uint16_t)value;
+}
+
 static int write_retry(mol_service_t *service, uintptr_t address,
                        uint32_t value)
 {
@@ -54,7 +69,8 @@ static void publish_display(mol_service_t *service)
     uint32_t status = (uint32_t)service->state |
         ((service->clock_mhz == 50U ? 0U :
           service->clock_mhz == 100U ? 1U : 2U) << 3) |
-        ((uint32_t)display_task(service->current_task) << 5);
+        ((uint32_t)display_task(service->current_task) << 5) |
+        ((uint32_t)service->activity_toggle << 8);
     uint32_t voltage = (uint32_t)service->vccint_mv |
                        ((uint32_t)service->vccaux_mv << 16);
     uint32_t lane;
@@ -101,19 +117,17 @@ void mol_service_init(mol_service_t *service,
     service->clock_mhz = 100U;
     service->ticks_per_second = ticks_per_second == 0U ? 1U : ticks_per_second;
     service->display_base = display_base;
-    service->batch_total = 100000U;
-    service->benchmark.latest_latency_us[0] = 14U;
-    service->benchmark.latest_latency_us[1] = 5890U;
-    service->benchmark.latest_latency_us[2] = 3U;
-    service->benchmark.latest_latency_us[3] = 5891U;
-    service->benchmark.cpu_latency_us[0] = 285U;
-    service->benchmark.cpu_latency_us[1] = 13488U;
-    service->benchmark.cpu_latency_us[2] = 123U;
-    service->benchmark.cpu_latency_us[3] = 13490U;
-    service->benchmark.speedup_q8_8[0] = 5215U;
-    service->benchmark.speedup_q8_8[1] = 586U;
-    service->benchmark.speedup_q8_8[2] = 10470U;
-    service->benchmark.speedup_q8_8[3] = 586U;
+    service->batch_total = 0U;
+    for (uint32_t lane = 0U; lane < 4U; ++lane) {
+        service->benchmark.latest_latency_us[lane] = measured_fpga_us[lane];
+        service->benchmark.cpu_latency_us[lane] =
+            cpu_us_per_item[lane] * measured_items[lane];
+        service->benchmark.end_to_end_speedup_q8_8[lane] = ratio_q8_8(
+            service->benchmark.cpu_latency_us[lane], measured_fpga_us[lane]);
+        service->benchmark.speedup_q8_8[lane] =
+            service->benchmark.end_to_end_speedup_q8_8[lane];
+    }
+    service->benchmark.speedup_q8_8[0] = MOL_TANIMOTO_CORE_SPEEDUP_Q8_8;
     service->boot_ticks = service_now(service);
     service->watchdog_mark = service->boot_ticks;
     service->sensor_mark = service->boot_ticks;
@@ -182,6 +196,7 @@ int mol_service_begin(mol_service_t *service, uint8_t task_id,
     }
     service->state = task_id == MOL_SERVICE_TASK_RELOAD ? MOL_RELOAD : MOL_BUSY;
     service->current_task = task_id;
+    service->activity_toggle ^= 1U;
     service->active_items = items;
     service->fallback_active = 0U;
     service->started_ticks = service_now(service);
@@ -206,20 +221,30 @@ void mol_service_complete(mol_service_t *service, int success,
     service->busy_ticks += now - service->started_ticks;
     task = service->current_task;
     if (success != 0) {
-        service->completed_count += 1U;
-        service->total_latency_us += latency_us;
-        service->avg_latency_us = (uint32_t)(service->total_latency_us /
-                                  service->completed_count);
         if (task < 4U) {
+            service->completed_count += 1U;
+            service->total_latency_us += latency_us;
+            service->avg_latency_us = (uint32_t)(service->total_latency_us /
+                                      service->completed_count);
             service->benchmark.latest_latency_us[task] = latency_us;
+            service->benchmark.cpu_latency_us[task] =
+                cpu_us_per_item[task] * service->active_items;
+            service->benchmark.end_to_end_speedup_q8_8[task] = ratio_q8_8(
+                service->benchmark.cpu_latency_us[task], latency_us);
+            if (task != 0U) {
+                service->benchmark.speedup_q8_8[task] =
+                    service->benchmark.end_to_end_speedup_q8_8[task];
+            }
         }
     } else {
         service->failed_count += 1U;
     }
     service->state = MOL_READY;
-    service->current_task = MOL_SERVICE_TASK_NONE;
     service->active_items = 0U;
+    // Publish the completed task once so sub-frame jobs remain visible on
+    // the LCD.  The service/API state is idle immediately afterwards.
     publish_display(service);
+    service->current_task = MOL_SERVICE_TASK_NONE;
 }
 
 void mol_service_set_batch(mol_service_t *service, uint32_t completed,

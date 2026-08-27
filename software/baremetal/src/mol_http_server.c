@@ -167,16 +167,30 @@ static void append_benchmark(mol_http_writer_t *writer,
         uint32_t whole = benchmark->speedup_q8_8[lane] >> 8;
         uint32_t fraction =
             ((benchmark->speedup_q8_8[lane] & 0xffU) * 100U + 128U) >> 8;
+        uint32_t end_to_end_whole =
+            benchmark->end_to_end_speedup_q8_8[lane] >> 8;
+        uint32_t end_to_end_fraction =
+            ((benchmark->end_to_end_speedup_q8_8[lane] & 0xffU) * 100U +
+             128U) >> 8;
         if (fraction == 100U) {
             whole += 1U;
             fraction = 0U;
         }
+        if (end_to_end_fraction == 100U) {
+            end_to_end_whole += 1U;
+            end_to_end_fraction = 0U;
+        }
         writer_append(writer,
             "%s{\"name\":\"%s\",\"cpu_us\":%lu,\"fpga_us\":%lu,"
-            "\"speedup\":%lu.%02lu}", lane == 0U ? "" : ",", names[lane],
+            "\"speedup\":%lu.%02lu,\"speedup_basis\":\"%s\","
+            "\"end_to_end_speedup\":%lu.%02lu}",
+            lane == 0U ? "" : ",", names[lane],
             (unsigned long)benchmark->cpu_latency_us[lane],
             (unsigned long)benchmark->latest_latency_us[lane],
-            (unsigned long)whole, (unsigned long)fraction);
+            (unsigned long)whole, (unsigned long)fraction,
+            lane == 0U ? "core" : "batch_end_to_end",
+            (unsigned long)end_to_end_whole,
+            (unsigned long)end_to_end_fraction);
     }
     writer_append(writer, "]}");
 }

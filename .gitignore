@@ -1,11 +1,27 @@
 # Python caches
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.venv/
+venv/
 
 # Simulation outputs
 sim/build/
 *.vcd
 *.vvp
+*.out
+
+# Web application dependencies, builds, runtime state, and secrets
+node_modules/
+dist/
+playwright-report/
+test-results/
+.env
+.env.*
+!.env.example
+web/drug-backend/data/
+web/drug-backend/logs/
+web/drug-backend/pipeline_history.json
 
 # Vivado generated files and build products
 *.jou
@@ -38,8 +54,6 @@ FPGA/FPGA.srcs/sources_1/bd/system/*_ooc.xdc
 
 # Candidate and diagnostic products created by rebuild/report scripts
 artifacts/candidate_dma_batch/
-artifacts/system_wrapper_tcp_service.*
-artifacts/accelerator_tcp_server.elf
 artifacts/selftest_weights.bin
 artifacts/experimental_failed/
 reports/experimental_failed/
@@ -54,6 +68,8 @@ FPGA/FPGA.srcs/sources_1/ip/*/*
 # Local safety copies and editor/OS clutter
 backup_before_codex_*/
 .codex_qa/
+.codex_doc_review/
+.superpowers/
 .docx_review_*/
 _local/
 *.pid

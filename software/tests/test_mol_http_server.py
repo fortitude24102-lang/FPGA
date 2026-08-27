@@ -65,6 +65,8 @@ int main(void) {
         benchmark.cpu_latency_us[lane] = 100U + lane;
         benchmark.latest_latency_us[lane] = 10U + lane;
         benchmark.speedup_q8_8[lane] = (uint16_t)((10U + lane) << 8);
+        benchmark.end_to_end_speedup_q8_8[lane] =
+            (uint16_t)((9U + lane) << 8);
     }
 
     assert(mol_http_respond("GET /api/fpga/health HTTP/1.1\r\nHost: z15\r\n",
@@ -80,7 +82,10 @@ int main(void) {
                     "200 OK", "\"temperature_c\":45.50", &health,
                     &benchmark);
     expect_response("GET /api/fpga/benchmark HTTP/1.1\r\n\r\n",
-                    "200 OK", "\"name\":\"Pipeline\"", &health,
+                    "200 OK", "\"speedup_basis\":\"core\"", &health,
+                    &benchmark);
+    expect_response("GET /api/fpga/benchmark HTTP/1.1\r\n\r\n",
+                    "200 OK", "\"end_to_end_speedup\":9.00", &health,
                     &benchmark);
     expect_response("GET / HTTP/1.1\r\n\r\n", "200 OK",
                     "setInterval(refresh,2000)", &health, &benchmark);

@@ -23,7 +23,8 @@ class Yt8531PatchTests(unittest.TestCase):
         )
 
     def test_patch_is_idempotent_and_preserves_vendor_drivers(self) -> None:
-        self.assertTrue(VITIS_SOURCE.exists(), VITIS_SOURCE)
+        if not VITIS_SOURCE.exists():
+            self.skipTest(f"Vitis 2019.2 vendor source not installed: {VITIS_SOURCE}")
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "xemacpsif_physpeed.c"
             source.write_bytes(VITIS_SOURCE.read_bytes())

@@ -1,0 +1,34 @@
+{
+  "version": "4.1",
+  "cache_ttl": 300,
+  "cache_maxsize": 1000,
+  "rate_limit": {
+    "enabled": true,
+    "default_limit": 120,
+    "window_seconds": 60,
+    "strict_endpoints": {
+      "/api/v1/pipeline/batch": 5,
+      "/api/batch-test/run": 5,
+      "/api/tasks/generate": 10
+    }
+  },
+  "websocket": {
+    "max_connections": 100,
+    "heartbeat_interval": 30,
+    "heartbeat_timeout": 90
+  },
+  "log_level": "INFO",
+  "cleanup_interval": 60,
+  "fpga": {
+    "timeout": 5.0,
+    "auto_fallback": true
+  },
+  "cors": {
+    "safe_origins": [
+      "http://localhost:5173",
+      "http://localhost:8080",
+      "http://127.0.0.1:5173",
+      "file://"
+    ]
+  }
+}

@@ -89,7 +89,23 @@ module generator_accelerator_top #(
     output wire [15:0]                     m_axis_result_tkeep,
     output wire                            m_axis_result_tvalid,
     input  wire                            m_axis_result_tready,
-    output wire                            m_axis_result_tlast
+    output wire                            m_axis_result_tlast,
+    output wire [2:0]                      engine_busy,
+    output wire [2:0]                      engine_start,
+    output wire [2:0]                      engine_done,
+    output wire [6:0]                      debug_queue_occupancy,
+    output wire [5:0]                      debug_active_sequence,
+
+    input  wire                            lcd_pixel_clk,
+    input  wire                            lcd_aresetn,
+    input  wire                            lcd_clock_locked,
+    output wire [23:0]                     lcd_rgb,
+    output wire                            lcd_hs,
+    output wire                            lcd_vs,
+    output wire                            lcd_de,
+    output wire                            lcd_clk,
+    output wire                            lcd_rst,
+    output wire                            lcd_bl
 );
 
     localparam integer GNN_FEATURE_BITS =
@@ -125,13 +141,33 @@ module generator_accelerator_top #(
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_GNN_WCOMMIT  = 18'h00404;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_ADMET_WDATA  = 18'h00410;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_ADMET_COMMIT = 18'h00414;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_STATUS    = 18'h00500;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_TEMP      = 18'h00504;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_VOLTAGE   = 18'h00508;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_DONE      = 18'h0050c;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_FAIL      = 18'h00510;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_AVG_LAT   = 18'h00514;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_LAT0      = 18'h00518;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_LAT1      = 18'h0051c;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_LAT2      = 18'h00520;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_LAT3      = 18'h00524;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_SPEED0    = 18'h00528;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_SPEED1    = 18'h0052c;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_SPEED2    = 18'h00530;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_SPEED3    = 18'h00534;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_BATCH_DONE= 18'h00538;
+    localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_LCD_BATCH_TOTAL=18'h0053c;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_ADJ_BASE     = 18'h01000;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_FEATURE_BASE = 18'h02000;
     localparam [C_S_AXI_ADDR_WIDTH-1:0] ADDR_GNN_OUT_BASE = 18'h04000;
 
+    wire [1023:0] query_fingerprint_bank0;
+    wire [1023:0] query_fingerprint_bank1;
+    wire [1023:0] database_fingerprint_bank0;
+    wire [1023:0] database_fingerprint_bank1;
     wire [1023:0] query_fingerprint;
     wire [1023:0] database_fingerprint;
-    reg [20*DATA_WIDTH-1:0] descriptor_buffer;
+    reg [2*20*DATA_WIDTH-1:0] descriptor_buffer;
 
     reg [C_S_AXI_ADDR_WIDTH-1:0] held_awaddr;
     reg [C_S_AXI_DATA_WIDTH-1:0] held_wdata;
@@ -145,6 +181,82 @@ module generator_accelerator_top #(
     reg [1:0] dma_test_mode;
     reg [31:0] dma_test_beats;
     reg [31:0] dma_test_source_index;
+    reg [2:0] display_service_state;
+    reg [1:0] display_clock_profile;
+    reg [2:0] display_current_task;
+    reg display_activity_toggle;
+    reg [15:0] display_temperature_q8_8;
+    reg [15:0] display_vccint_mv;
+    reg [15:0] display_vccaux_mv;
+    reg [31:0] display_completed_count;
+    reg [31:0] display_failed_count;
+    reg [31:0] display_avg_latency_us;
+    reg [31:0] display_latest_latency0_us;
+    reg [31:0] display_latest_latency1_us;
+    reg [31:0] display_latest_latency2_us;
+    reg [31:0] display_latest_latency3_us;
+    reg [15:0] display_speedup0_q8_8;
+    reg [15:0] display_speedup1_q8_8;
+    reg [15:0] display_speedup2_q8_8;
+    reg [15:0] display_speedup3_q8_8;
+    reg [31:0] display_batch_completed;
+    reg [31:0] display_batch_total;
+    wire [408:0] display_staging_bundle = {
+        display_service_state, display_clock_profile, display_current_task,
+        display_activity_toggle,
+        display_temperature_q8_8, display_vccint_mv, display_vccaux_mv,
+        display_completed_count, display_failed_count, display_avg_latency_us,
+        display_latest_latency0_us, display_latest_latency1_us,
+        display_latest_latency2_us, display_latest_latency3_us,
+        display_speedup0_q8_8, display_speedup1_q8_8,
+        display_speedup2_q8_8, display_speedup3_q8_8,
+        display_batch_completed, display_batch_total
+    };
+    reg [408:0] display_hold_bundle;
+    reg display_commit_toggle;
+    reg display_commit_pending;
+    (* ASYNC_REG = "TRUE" *) reg display_ack_meta;
+    (* ASYNC_REG = "TRUE" *) reg display_ack_sync;
+    (* ASYNC_REG = "TRUE" *) reg display_commit_meta;
+    (* ASYNC_REG = "TRUE" *) reg display_commit_sync;
+    reg display_ack_toggle;
+    reg [408:0] display_pixel_bundle;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] display_engine_busy_meta;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] display_pixel_engine_busy;
+    wire [2:0] display_pixel_service_state;
+    wire [1:0] display_pixel_clock_profile;
+    wire [2:0] display_pixel_current_task;
+    wire display_pixel_activity_toggle;
+    wire [15:0] display_pixel_temperature_q8_8;
+    wire [15:0] display_pixel_vccint_mv;
+    wire [15:0] display_pixel_vccaux_mv;
+    wire [31:0] display_pixel_completed_count;
+    wire [31:0] display_pixel_failed_count;
+    wire [31:0] display_pixel_avg_latency_us;
+    wire [31:0] display_pixel_latest_latency0_us;
+    wire [31:0] display_pixel_latest_latency1_us;
+    wire [31:0] display_pixel_latest_latency2_us;
+    wire [31:0] display_pixel_latest_latency3_us;
+    wire [15:0] display_pixel_speedup0_q8_8;
+    wire [15:0] display_pixel_speedup1_q8_8;
+    wire [15:0] display_pixel_speedup2_q8_8;
+    wire [15:0] display_pixel_speedup3_q8_8;
+    wire [31:0] display_pixel_batch_completed;
+    wire [31:0] display_pixel_batch_total;
+
+    assign {
+        display_pixel_service_state, display_pixel_clock_profile,
+        display_pixel_current_task, display_pixel_activity_toggle,
+        display_pixel_temperature_q8_8,
+        display_pixel_vccint_mv, display_pixel_vccaux_mv,
+        display_pixel_completed_count, display_pixel_failed_count,
+        display_pixel_avg_latency_us, display_pixel_latest_latency0_us,
+        display_pixel_latest_latency1_us, display_pixel_latest_latency2_us,
+        display_pixel_latest_latency3_us, display_pixel_speedup0_q8_8,
+        display_pixel_speedup1_q8_8, display_pixel_speedup2_q8_8,
+        display_pixel_speedup3_q8_8, display_pixel_batch_completed,
+        display_pixel_batch_total
+    } = display_pixel_bundle;
     reg [DATA_WIDTH-1:0] gnn_weight_data_reg;
     reg [DATA_WIDTH-1:0] admet_weight_data_reg;
     reg gnn_weight_we;
@@ -171,31 +283,56 @@ module generator_accelerator_top #(
     wire dma_fingerprint_db_select;
     wire [4:0] dma_fingerprint_addr;
     wire [31:0] dma_fingerprint_wdata;
+    wire dma_tanimoto_input_write_bank;
+    wire dma_tanimoto_input_run_bank;
+    wire dma_gnn_input_write_bank;
+    wire dma_gnn_input_run_bank;
+    wire dma_admet_input_write_bank;
+    wire dma_admet_input_run_bank;
 
+    wire dma_tani_write_allowed = !tanimoto_busy ||
+        dma_tanimoto_input_write_bank != dma_tanimoto_input_run_bank;
     wire dma_query_write = dma_active && dma_fingerprint_we &&
-                           !dma_fingerprint_db_select;
+                           !dma_fingerprint_db_select && dma_tani_write_allowed;
     wire dma_db_write = dma_active && dma_fingerprint_we &&
-                        dma_fingerprint_db_select;
-    accelerator_fingerprint_bank u_query_bank (
+                        dma_fingerprint_db_select && dma_tani_write_allowed;
+    accelerator_fingerprint_bank u_query_bank0 (
         .clk(s_axi_aclk), .rst_n(s_axi_aresetn),
-        .we(dma_query_write || legacy_query_we),
+        .we((dma_query_write && !dma_tanimoto_input_write_bank) ||
+            legacy_query_we),
         .waddr(dma_query_write ? dma_fingerprint_addr :
                                  legacy_fingerprint_addr),
         .wdata(dma_query_write ? dma_fingerprint_wdata :
                                  legacy_fingerprint_wdata),
         .wstrb(dma_query_write ? 4'hf : legacy_fingerprint_wstrb),
-        .packed_data(query_fingerprint)
+        .packed_data(query_fingerprint_bank0)
     );
-    accelerator_fingerprint_bank u_database_bank (
+    accelerator_fingerprint_bank u_query_bank1 (
         .clk(s_axi_aclk), .rst_n(s_axi_aresetn),
-        .we(dma_db_write || legacy_db_we),
+        .we(dma_query_write && dma_tanimoto_input_write_bank),
+        .waddr(dma_fingerprint_addr), .wdata(dma_fingerprint_wdata),
+        .wstrb(4'hf), .packed_data(query_fingerprint_bank1)
+    );
+    accelerator_fingerprint_bank u_database_bank0 (
+        .clk(s_axi_aclk), .rst_n(s_axi_aresetn),
+        .we((dma_db_write && !dma_tanimoto_input_write_bank) || legacy_db_we),
         .waddr(dma_db_write ? dma_fingerprint_addr :
                               legacy_fingerprint_addr),
         .wdata(dma_db_write ? dma_fingerprint_wdata :
                               legacy_fingerprint_wdata),
         .wstrb(dma_db_write ? 4'hf : legacy_fingerprint_wstrb),
-        .packed_data(database_fingerprint)
+        .packed_data(database_fingerprint_bank0)
     );
+    accelerator_fingerprint_bank u_database_bank1 (
+        .clk(s_axi_aclk), .rst_n(s_axi_aresetn),
+        .we(dma_db_write && dma_tanimoto_input_write_bank),
+        .waddr(dma_fingerprint_addr), .wdata(dma_fingerprint_wdata),
+        .wstrb(4'hf), .packed_data(database_fingerprint_bank1)
+    );
+    assign query_fingerprint = dma_active && dma_tanimoto_input_run_bank ?
+        query_fingerprint_bank1 : query_fingerprint_bank0;
+    assign database_fingerprint = dma_active && dma_tanimoto_input_run_bank ?
+        database_fingerprint_bank1 : database_fingerprint_bank0;
 
     assign s_axi_awready = !aw_held && !s_axi_bvalid;
     assign s_axi_wready  = !w_held && !s_axi_bvalid;
@@ -222,6 +359,31 @@ module generator_accelerator_top #(
             dma_test_mode        <= 2'd0;
             dma_test_beats       <= 32'd0;
             dma_test_source_index<= 32'd0;
+            display_service_state <= 3'd1;
+            display_clock_profile <= 2'd1;
+            display_current_task <= 3'd7;
+            display_activity_toggle <= 1'b0;
+            display_temperature_q8_8 <= 16'h2d00;
+            display_vccint_mv <= 16'd1000;
+            display_vccaux_mv <= 16'd1800;
+            display_completed_count <= 32'd0;
+            display_failed_count <= 32'd0;
+            display_avg_latency_us <= 32'd0;
+            display_latest_latency0_us <= 32'd14;
+            display_latest_latency1_us <= 32'd5890;
+            display_latest_latency2_us <= 32'd3;
+            display_latest_latency3_us <= 32'd5891;
+            display_speedup0_q8_8 <= 16'd5215;
+            display_speedup1_q8_8 <= 16'd586;
+            display_speedup2_q8_8 <= 16'd10470;
+            display_speedup3_q8_8 <= 16'd586;
+            display_batch_completed <= 32'd0;
+            display_batch_total <= 32'd0;
+            display_hold_bundle <= 409'd0;
+            display_commit_toggle <= 1'b0;
+            display_commit_pending <= 1'b0;
+            display_ack_meta <= 1'b0;
+            display_ack_sync <= 1'b0;
             gnn_weight_data_reg  <= {DATA_WIDTH{1'b0}};
             admet_weight_data_reg<= {DATA_WIDTH{1'b0}};
             gnn_weight_we        <= 1'b0;
@@ -243,8 +405,10 @@ module generator_accelerator_top #(
             legacy_fingerprint_addr <= 5'd0;
             legacy_fingerprint_wdata <= 32'd0;
             legacy_fingerprint_wstrb <= 4'd0;
-            descriptor_buffer    <= {20*DATA_WIDTH{1'b0}};
+            descriptor_buffer    <= {2*20*DATA_WIDTH{1'b0}};
         end else begin
+            display_ack_meta <= display_ack_toggle;
+            display_ack_sync <= display_ack_meta;
             command_start <= 1'b0;
             command_clear <= 1'b0;
             gnn_weight_we <= 1'b0;
@@ -253,6 +417,13 @@ module generator_accelerator_top #(
             admet_cfg_we  <= 1'b0;
             legacy_query_we <= 1'b0;
             legacy_db_we <= 1'b0;
+
+            if (display_commit_pending &&
+                display_ack_sync == display_commit_toggle) begin
+                display_hold_bundle <= display_staging_bundle;
+                display_commit_toggle <= ~display_commit_toggle;
+                display_commit_pending <= 1'b0;
+            end
 
             if (dma_test_mode == 2'd3 && m_axis_result_tready &&
                 dma_test_source_index < dma_test_beats)
@@ -278,6 +449,64 @@ module generator_accelerator_top #(
                     dma_test_source_index <= 32'd0;
                 end else if (held_awaddr == ADDR_DMA_TEST_BEATS) begin
                     dma_test_beats <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_STATUS) begin
+                    display_service_state <= held_wdata[2:0];
+                    display_clock_profile <= held_wdata[4:3];
+                    display_current_task <= held_wdata[7:5];
+                    display_activity_toggle <= held_wdata[8];
+                end else if (held_awaddr == ADDR_LCD_TEMP) begin
+                    display_temperature_q8_8 <= held_wdata[15:0];
+                end else if (held_awaddr == ADDR_LCD_VOLTAGE) begin
+                    display_vccint_mv <= held_wdata[15:0];
+                    display_vccaux_mv <= held_wdata[31:16];
+                end else if (held_awaddr == ADDR_LCD_DONE) begin
+                    display_completed_count <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_FAIL) begin
+                    display_failed_count <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_AVG_LAT) begin
+                    display_avg_latency_us <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_LAT0) begin
+                    display_latest_latency0_us <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_LAT1) begin
+                    display_latest_latency1_us <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_LAT2) begin
+                    display_latest_latency2_us <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_LAT3) begin
+                    display_latest_latency3_us <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_SPEED0) begin
+                    display_speedup0_q8_8 <= held_wdata[15:0];
+                end else if (held_awaddr == ADDR_LCD_SPEED1) begin
+                    display_speedup1_q8_8 <= held_wdata[15:0];
+                end else if (held_awaddr == ADDR_LCD_SPEED2) begin
+                    display_speedup2_q8_8 <= held_wdata[15:0];
+                end else if (held_awaddr == ADDR_LCD_SPEED3) begin
+                    display_speedup3_q8_8 <= held_wdata[15:0];
+                end else if (held_awaddr == ADDR_LCD_BATCH_DONE) begin
+                    display_batch_completed <= held_wdata;
+                end else if (held_awaddr == ADDR_LCD_BATCH_TOTAL) begin
+                    display_batch_total <= held_wdata;
+                    if (display_ack_sync == display_commit_toggle &&
+                        !display_commit_pending) begin
+                        display_hold_bundle <= {
+                            display_service_state, display_clock_profile,
+                            display_current_task, display_activity_toggle,
+                            display_temperature_q8_8, display_vccint_mv,
+                            display_vccaux_mv, display_completed_count,
+                            display_failed_count, display_avg_latency_us,
+                            display_latest_latency0_us,
+                            display_latest_latency1_us,
+                            display_latest_latency2_us,
+                            display_latest_latency3_us,
+                            display_speedup0_q8_8,
+                            display_speedup1_q8_8,
+                            display_speedup2_q8_8,
+                            display_speedup3_q8_8,
+                            display_batch_completed, held_wdata
+                        };
+                        display_commit_toggle <= ~display_commit_toggle;
+                    end else begin
+                        display_commit_pending <= 1'b1;
+                    end
                 end else if (held_awaddr >= ADDR_QUERY_BASE &&
                              held_awaddr < ADDR_QUERY_BASE + 128) begin
                     legacy_query_we <= 1'b1;
@@ -342,8 +571,29 @@ module generator_accelerator_top #(
             end
 
             if (dma_active && dma_descriptor_we)
-                descriptor_buffer[dma_descriptor_addr*DATA_WIDTH +:
+                descriptor_buffer[(dma_admet_input_write_bank*20 +
+                                   dma_descriptor_addr)*DATA_WIDTH +:
                                   DATA_WIDTH] <= dma_descriptor_wdata;
+        end
+    end
+
+    always @(posedge lcd_pixel_clk or negedge lcd_aresetn) begin
+        if (!lcd_aresetn) begin
+            display_commit_meta <= 1'b0;
+            display_commit_sync <= 1'b0;
+            display_ack_toggle <= 1'b0;
+            display_pixel_bundle <= 409'd0;
+            display_engine_busy_meta <= 3'd0;
+            display_pixel_engine_busy <= 3'd0;
+        end else begin
+            display_commit_meta <= display_commit_toggle;
+            display_commit_sync <= display_commit_meta;
+            display_engine_busy_meta <= engine_busy;
+            display_pixel_engine_busy <= display_engine_busy_meta;
+            if (display_commit_sync != display_ack_toggle) begin
+                display_pixel_bundle <= display_hold_bundle;
+                display_ack_toggle <= display_commit_sync;
+            end
         end
     end
 
@@ -388,10 +638,20 @@ module generator_accelerator_top #(
     wire [3:0] dma_gnn_adjacency_wstrb;
     wire dma_gnn_output_re;
     wire [GNN_OUTPUT_ADDR_W-1:0] dma_gnn_output_addr;
+    wire dma_gnn_weight_we;
+    wire [GNN_WEIGHT_ADDR_W-1:0] dma_gnn_weight_addr;
+    wire [DATA_WIDTH-1:0] dma_gnn_weight_wdata;
     wire dma_admet_start;
     wire dma_descriptor_we;
     wire [4:0] dma_descriptor_addr;
     wire [DATA_WIDTH-1:0] dma_descriptor_wdata;
+    wire dma_admet_cfg_we;
+    wire [1:0] dma_admet_cfg_model;
+    wire [1:0] dma_admet_cfg_layer;
+    wire [15:0] dma_admet_cfg_addr;
+    wire [DATA_WIDTH-1:0] dma_admet_cfg_wdata;
+    wire dma_weight_cfg_bank;
+    wire dma_weight_run_bank;
 
     wire core_tanimoto_start = dma_active ? dma_tanimoto_start : tanimoto_start;
     wire core_gnn_start = dma_active ? dma_gnn_start : gnn_start;
@@ -414,6 +674,27 @@ module generator_accelerator_top #(
     wire [GNN_OUTPUT_ADDR_W-1:0] core_gnn_output_addr =
         dma_active ? dma_gnn_output_addr : gnn_output_addr;
     wire core_admet_start = dma_active ? dma_admet_start : admet_start;
+    wire core_gnn_input_write_bank = dma_active ?
+        dma_gnn_input_write_bank : 1'b0;
+    wire core_gnn_input_run_bank = dma_active ?
+        dma_gnn_input_run_bank : 1'b0;
+    wire core_gnn_weight_we = dma_active ? dma_gnn_weight_we : gnn_weight_we;
+    wire [GNN_WEIGHT_ADDR_W-1:0] core_gnn_weight_addr =
+        dma_active ? dma_gnn_weight_addr : gnn_weight_addr;
+    wire [DATA_WIDTH-1:0] core_gnn_weight_wdata =
+        dma_active ? dma_gnn_weight_wdata : gnn_weight_data_reg;
+    wire core_admet_cfg_we = dma_active ? dma_admet_cfg_we : admet_cfg_we;
+    wire [1:0] core_admet_cfg_model =
+        dma_active ? dma_admet_cfg_model : admet_cfg_model;
+    wire [1:0] core_admet_cfg_layer =
+        dma_active ? dma_admet_cfg_layer : admet_cfg_layer;
+    wire [15:0] core_admet_cfg_addr =
+        dma_active ? dma_admet_cfg_addr : admet_cfg_addr;
+    wire [DATA_WIDTH-1:0] core_admet_cfg_wdata =
+        dma_active ? dma_admet_cfg_wdata : admet_weight_data_reg;
+    wire core_weight_cfg_bank =
+        dma_active ? dma_weight_cfg_bank : dma_weight_run_bank;
+    wire core_weight_run_bank = dma_weight_run_bank;
 
     tanimoto_accelerator u_tanimoto (
         .clk(s_axi_aclk),
@@ -436,6 +717,8 @@ module generator_accelerator_top #(
         .clk(s_axi_aclk),
         .rst_n(s_axi_aresetn),
         .start(core_gnn_start),
+        .input_write_bank(core_gnn_input_write_bank),
+        .input_run_bank(core_gnn_input_run_bank),
         .node_features_in({GNN_FEATURE_BITS{1'b0}}),
         .adjacency_in({GNN_ADJ_BITS{1'b0}}),
         .node_features_out(),
@@ -450,9 +733,11 @@ module generator_accelerator_top #(
         .output_re(core_gnn_output_re),
         .output_word_addr(core_gnn_output_addr),
         .output_rdata(gnn_output_rdata),
-        .weight_we(gnn_weight_we),
-        .weight_addr(gnn_weight_addr),
-        .weight_wdata(gnn_weight_data_reg),
+        .weight_we(core_gnn_weight_we),
+        .weight_addr(core_gnn_weight_addr),
+        .weight_wdata(core_gnn_weight_wdata),
+        .cfg_bank(core_weight_cfg_bank),
+        .run_bank(core_weight_run_bank),
         .busy(gnn_busy),
         .valid(gnn_valid)
     );
@@ -465,12 +750,16 @@ module generator_accelerator_top #(
         .clk(s_axi_aclk),
         .rst_n(s_axi_aresetn),
         .start(core_admet_start),
-        .descriptors(descriptor_buffer),
-        .cfg_we(admet_cfg_we),
-        .cfg_model(admet_cfg_model),
-        .cfg_layer(admet_cfg_layer),
-        .cfg_addr(admet_cfg_addr),
-        .cfg_wdata(admet_weight_data_reg),
+        .descriptors(dma_active && dma_admet_input_run_bank ?
+                     descriptor_buffer[20*DATA_WIDTH +: 20*DATA_WIDTH] :
+                     descriptor_buffer[0 +: 20*DATA_WIDTH]),
+        .cfg_we(core_admet_cfg_we),
+        .cfg_model(core_admet_cfg_model),
+        .cfg_layer(core_admet_cfg_layer),
+        .cfg_addr(core_admet_cfg_addr),
+        .cfg_wdata(core_admet_cfg_wdata),
+        .cfg_bank(core_weight_cfg_bank),
+        .run_bank(core_weight_run_bank),
         .busy(admet_busy),
         .valid(admet_valid),
         .logp(logp),
@@ -589,7 +878,9 @@ module generator_accelerator_top #(
     wire [7:0] backend_task_id;
     wire [31:0] backend_task_flags;
     wire [31:0] backend_task_item_count;
+    wire [31:0] backend_task_user_tag;
     wire [31:0] backend_task_timeout_cycles;
+    wire [5:0] backend_task_sequence;
     wire backend_payload_valid;
     wire backend_payload_ready;
     wire [31:0] backend_payload_data;
@@ -599,6 +890,7 @@ module generator_accelerator_top #(
     wire [23:0] backend_done_status;
     wire [31:0] backend_done_result_words;
     wire [31:0] backend_done_detail;
+    wire [5:0] backend_done_sequence;
     wire backend_result_valid;
     wire backend_result_ready;
     wire [31:0] backend_result_data;
@@ -653,7 +945,9 @@ module generator_accelerator_top #(
         .backend_task_ready(backend_task_ready),
         .backend_task_id(backend_task_id), .backend_task_flags(backend_task_flags),
         .backend_task_item_count(backend_task_item_count),
+        .backend_task_user_tag(backend_task_user_tag),
         .backend_task_timeout_cycles(backend_task_timeout_cycles),
+        .backend_task_sequence(backend_task_sequence),
         .backend_payload_valid(backend_payload_valid),
         .backend_payload_ready(backend_payload_ready),
         .backend_payload_data(backend_payload_data),
@@ -663,12 +957,15 @@ module generator_accelerator_top #(
         .backend_done_status(backend_done_status),
         .backend_done_result_words(backend_done_result_words),
         .backend_done_detail(backend_done_detail),
+        .backend_done_sequence(backend_done_sequence),
         .backend_result_valid(backend_result_valid),
         .backend_result_ready(backend_result_ready),
         .backend_result_data(backend_result_data), .backend_abort(backend_abort),
         .legacy_active(scheduler_state != ST_IDLE),
         .legacy_start(command_start), .legacy_reject(dma_legacy_reject),
-        .dma_active(dma_active)
+        .dma_active(dma_active),
+        .debug_queue_occupancy(debug_queue_occupancy),
+        .debug_active_sequence(debug_active_sequence)
     );
 
     dma_result_formatter u_dma_formatter (
@@ -732,6 +1029,8 @@ module generator_accelerator_top #(
         .task_valid(backend_task_valid), .task_ready(backend_task_ready),
         .task_id(backend_task_id), .task_flags(backend_task_flags),
         .task_item_count(backend_task_item_count),
+        .task_user_tag(backend_task_user_tag),
+        .task_sequence(backend_task_sequence),
         .payload_valid(backend_payload_valid),
         .payload_ready(backend_payload_ready),
         .payload_data(backend_payload_data), .payload_last(backend_payload_last),
@@ -739,16 +1038,24 @@ module generator_accelerator_top #(
         .done_status(backend_done_status),
         .done_result_words(backend_done_result_words),
         .done_detail(backend_done_detail),
+        .done_sequence(backend_done_sequence),
         .result_valid(backend_result_valid), .result_ready(backend_result_ready),
         .result_data(backend_result_data), .abort(backend_abort),
+        .engine_busy(engine_busy), .engine_start(engine_start),
+        .engine_done(engine_done),
         .tanimoto_start(dma_tanimoto_start),
         .fingerprint_we(dma_fingerprint_we),
         .fingerprint_db_select(dma_fingerprint_db_select),
         .fingerprint_addr(dma_fingerprint_addr),
         .fingerprint_wdata(dma_fingerprint_wdata),
+        .tanimoto_input_write_bank(dma_tanimoto_input_write_bank),
+        .tanimoto_input_run_bank(dma_tanimoto_input_run_bank),
         .tanimoto_busy(tanimoto_busy), .tanimoto_valid(tanimoto_valid),
         .tanimoto_similarity(tanimoto_similarity),
-        .gnn_start(dma_gnn_start), .gnn_feature_we(dma_gnn_feature_we),
+        .gnn_start(dma_gnn_start),
+        .gnn_input_write_bank(dma_gnn_input_write_bank),
+        .gnn_input_run_bank(dma_gnn_input_run_bank),
+        .gnn_feature_we(dma_gnn_feature_we),
         .gnn_feature_addr(dma_gnn_feature_addr),
         .gnn_feature_wdata(dma_gnn_feature_wdata),
         .gnn_feature_wstrb(dma_gnn_feature_wstrb),
@@ -759,12 +1066,25 @@ module generator_accelerator_top #(
         .gnn_output_re(dma_gnn_output_re),
         .gnn_output_addr(dma_gnn_output_addr),
         .gnn_output_rdata(gnn_output_rdata), .gnn_busy(gnn_busy),
-        .gnn_valid(gnn_valid), .admet_start(dma_admet_start),
+        .gnn_valid(gnn_valid),
+        .gnn_weight_we(dma_gnn_weight_we),
+        .gnn_weight_addr(dma_gnn_weight_addr),
+        .gnn_weight_wdata(dma_gnn_weight_wdata),
+        .admet_start(dma_admet_start),
+        .admet_input_write_bank(dma_admet_input_write_bank),
+        .admet_input_run_bank(dma_admet_input_run_bank),
         .descriptor_we(dma_descriptor_we),
         .descriptor_addr(dma_descriptor_addr),
         .descriptor_wdata(dma_descriptor_wdata),
         .admet_busy(admet_busy), .admet_valid(admet_valid),
-        .admet_predictions(admet_predictions)
+        .admet_predictions(admet_predictions),
+        .admet_cfg_we(dma_admet_cfg_we),
+        .admet_cfg_model(dma_admet_cfg_model),
+        .admet_cfg_layer(dma_admet_cfg_layer),
+        .admet_cfg_addr(dma_admet_cfg_addr),
+        .admet_cfg_wdata(dma_admet_cfg_wdata),
+        .weight_cfg_bank(dma_weight_cfg_bank),
+        .weight_run_bank(dma_weight_run_bank)
     );
 
     always @(posedge s_axi_aclk or negedge s_axi_aresetn) begin
@@ -861,6 +1181,40 @@ module generator_accelerator_top #(
             read_data_mux = {30'd0, dma_test_mode};
         end else if (s_axi_araddr == ADDR_DMA_TEST_BEATS) begin
             read_data_mux = dma_test_beats;
+        end else if (s_axi_araddr == ADDR_LCD_STATUS) begin
+            read_data_mux = {23'd0, display_activity_toggle,
+                             display_current_task,
+                             display_clock_profile, display_service_state};
+        end else if (s_axi_araddr == ADDR_LCD_TEMP) begin
+            read_data_mux = {16'd0, display_temperature_q8_8};
+        end else if (s_axi_araddr == ADDR_LCD_VOLTAGE) begin
+            read_data_mux = {display_vccaux_mv, display_vccint_mv};
+        end else if (s_axi_araddr == ADDR_LCD_DONE) begin
+            read_data_mux = display_completed_count;
+        end else if (s_axi_araddr == ADDR_LCD_FAIL) begin
+            read_data_mux = display_failed_count;
+        end else if (s_axi_araddr == ADDR_LCD_AVG_LAT) begin
+            read_data_mux = display_avg_latency_us;
+        end else if (s_axi_araddr == ADDR_LCD_LAT0) begin
+            read_data_mux = display_latest_latency0_us;
+        end else if (s_axi_araddr == ADDR_LCD_LAT1) begin
+            read_data_mux = display_latest_latency1_us;
+        end else if (s_axi_araddr == ADDR_LCD_LAT2) begin
+            read_data_mux = display_latest_latency2_us;
+        end else if (s_axi_araddr == ADDR_LCD_LAT3) begin
+            read_data_mux = display_latest_latency3_us;
+        end else if (s_axi_araddr == ADDR_LCD_SPEED0) begin
+            read_data_mux = {16'd0, display_speedup0_q8_8};
+        end else if (s_axi_araddr == ADDR_LCD_SPEED1) begin
+            read_data_mux = {16'd0, display_speedup1_q8_8};
+        end else if (s_axi_araddr == ADDR_LCD_SPEED2) begin
+            read_data_mux = {16'd0, display_speedup2_q8_8};
+        end else if (s_axi_araddr == ADDR_LCD_SPEED3) begin
+            read_data_mux = {16'd0, display_speedup3_q8_8};
+        end else if (s_axi_araddr == ADDR_LCD_BATCH_DONE) begin
+            read_data_mux = display_batch_completed;
+        end else if (s_axi_araddr == ADDR_LCD_BATCH_TOTAL) begin
+            read_data_mux = display_batch_total;
         end else if (s_axi_araddr >= ADDR_QUERY_BASE &&
                      s_axi_araddr < ADDR_QUERY_BASE + 128) begin
             read_data_mux = query_fingerprint[
@@ -927,5 +1281,35 @@ module generator_accelerator_top #(
             end
         end
     end
+
+    lcd_status_display u_lcd_status_display (
+        .pixel_clk(lcd_pixel_clk),
+        .reset_n(lcd_aresetn),
+        .clock_locked(lcd_clock_locked),
+        .service_state(display_pixel_service_state),
+        .clock_profile(display_pixel_clock_profile),
+        .current_task(display_pixel_current_task),
+        .activity_toggle(display_pixel_activity_toggle),
+        .temperature_q8_8(display_pixel_temperature_q8_8),
+        .vccint_mv(display_pixel_vccint_mv),
+        .vccaux_mv(display_pixel_vccaux_mv),
+        .engine_busy(display_pixel_engine_busy),
+        .completed_count(display_pixel_completed_count),
+        .failed_count(display_pixel_failed_count),
+        .avg_latency_us(display_pixel_avg_latency_us),
+        .latest_latency0_us(display_pixel_latest_latency0_us),
+        .latest_latency1_us(display_pixel_latest_latency1_us),
+        .latest_latency2_us(display_pixel_latest_latency2_us),
+        .latest_latency3_us(display_pixel_latest_latency3_us),
+        .speedup0_q8_8(display_pixel_speedup0_q8_8),
+        .speedup1_q8_8(display_pixel_speedup1_q8_8),
+        .speedup2_q8_8(display_pixel_speedup2_q8_8),
+        .speedup3_q8_8(display_pixel_speedup3_q8_8),
+        .batch_completed(display_pixel_batch_completed),
+        .batch_total(display_pixel_batch_total),
+        .lcd_rgb(lcd_rgb), .lcd_hs(lcd_hs), .lcd_vs(lcd_vs),
+        .lcd_de(lcd_de), .lcd_clk(lcd_clk), .lcd_rst(lcd_rst),
+        .lcd_bl(lcd_bl)
+    );
 
 endmodule

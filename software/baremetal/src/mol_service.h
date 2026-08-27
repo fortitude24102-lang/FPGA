@@ -59,6 +59,7 @@ typedef struct {
     uint32_t latest_latency_us[4];
     uint32_t cpu_latency_us[4];
     uint16_t speedup_q8_8[4];
+    uint16_t end_to_end_speedup_q8_8[4];
 } mol_benchmark_snapshot_t;
 
 typedef struct {
@@ -67,7 +68,7 @@ typedef struct {
     uint8_t current_task;
     uint8_t fallback_active;
     uint8_t overclock_experimental;
-    uint8_t reserved;
+    uint8_t activity_toggle;
     uint32_t clock_mhz;
     uint32_t active_items;
     uint32_t completed_count;

@@ -11,6 +11,8 @@ GitHub 仓库只保存复现设计和核验最终结果所需的文件。
 - `protocol/`：DMA 协议规范和由规范生成的常量，修改协议时应先改这里。
 - `sim/`：RTL testbench、回归入口与协议一致性测试；`sim/build/` 被忽略。
 - `software/`：PS 端 Standalone 源、Vitis 创建/重建脚本和主机单元测试。
+- `web/`：MolRecommender 后端与原始前端源码；依赖、密钥、运行数据和构建结果
+  不进入版本控制。
 - `FPGA/`：Vivado 工程入口、Block Design、IP 配置 XCI、实现/编程 Tcl；
   cache、runs、hw、sim 和生成的 BD 输出不提交。
 - `ip_repo/`：自定义 IP 的可复现打包源。
@@ -34,8 +36,8 @@ GitHub 仓库只保存复现设计和核验最终结果所需的文件。
 - `vitis_workspace/`：Vitis 平台、BSP、Debug/Release 应用和 ELF。
 - `artifacts/candidate_dma_batch/`：重建脚本产生的待验收候选物。
 - `reports/candidate_dma_batch/`：候选实现的时序、资源和门禁报告。
-- `_local/archive/`：整理前的历史、调试、ILA、旧报告与一次性脚本，按原相对
-  路径保存，便于本机恢复。
+- Web 依赖与运行状态：`node_modules/`、`venv/`、`dist/`、`.env`、日志和
+  `web/drug-backend/data/`。
 
 ## 本地归档工具
 
@@ -52,4 +54,4 @@ GitHub 仓库只保存复现设计和核验最终结果所需的文件。
 ```
 
 脚本拒绝移动 Git 已跟踪内容、正式 bit/XSA、正式板测日志和最终 Word；目标
-已存在时也会停止，不会覆盖本地归档。
+已存在时也会停止，不会覆盖本地归档。项目发布前可直接删除 `_local/`。

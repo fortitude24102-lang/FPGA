@@ -31,6 +31,7 @@ typedef struct {
     uint16_t temp;
     uint16_t vccint;
     uint16_t vccaux;
+    uint32_t lcd_status;
 } mock_t;
 
 static uint64_t timer_now(void *arg) { return ((mock_t *)arg)->now; }
@@ -48,7 +49,8 @@ static int read_xadc(void *arg, uint16_t *temp, uint16_t *vccint,
 }
 static int write_mmio(void *arg, uintptr_t address, uint32_t value) {
     mock_t *mock = (mock_t *)arg;
-    (void)address; (void)value; mock->writes++; return 0;
+    if (address == 0x43c00500U) mock->lcd_status = value;
+    mock->writes++; return 0;
 }
 static void kick(void *arg) { ((mock_t *)arg)->watchdog_kicks++; }
 static void idle(void *arg) { ((mock_t *)arg)->idle_calls++; }
@@ -72,12 +74,29 @@ int main(void) {
     mock_t mock;
     mol_service_t service;
     mol_service_snapshot_t snapshot;
+    mol_benchmark_snapshot_t benchmark;
     memset(&mock, 0, sizeof(mock));
     mock.temp = 45U << 8; mock.vccint = 1000; mock.vccaux = 1800;
     service = new_service(&mock);
     assert(service.state == MOL_INIT);
+    assert(service.batch_completed == 0U && service.batch_total == 0U);
+    mol_service_benchmark_snapshot(&service, &benchmark);
+    assert(benchmark.latest_latency_us[0] == 33U);
+    assert(benchmark.latest_latency_us[1] == 797U);
+    assert(benchmark.latest_latency_us[2] == 99U);
+    assert(benchmark.latest_latency_us[3] == 1088U);
+    assert(benchmark.speedup_q8_8[0] == 120U * 256U);
+    assert(benchmark.end_to_end_speedup_q8_8[0] == 2979U);
+    assert(benchmark.speedup_q8_8[1] == 8654U);
     assert(mol_service_mark_ready(&service) == MOL_SERVICE_OK);
     assert(service.state == MOL_READY);
+    {
+        uint32_t ready_status = mock.lcd_status;
+        assert(mol_service_begin(&service, MOL_SERVICE_TASK_RELOAD, 1U) ==
+               MOL_SERVICE_OK);
+        assert(((ready_status ^ mock.lcd_status) & (1U << 8)) != 0U);
+        mol_service_complete(&service, 1, 1U);
+    }
 
     mock.clock_calls = 0; mock.clock_failures = 2;
     assert(mol_service_set_clock(&service, 150) == MOL_SERVICE_OK);
@@ -98,15 +117,26 @@ int main(void) {
     assert(service.state == MOL_RELOAD);
     mock.now += 500;
     mol_service_complete(&service, 1, 500);
-    assert(service.state == MOL_READY && service.completed_count == 1);
+    assert(service.state == MOL_READY && service.completed_count == 0);
 
     mock.clock_calls = 0; mock.clock_failures = 3;
     assert(mol_service_set_clock(&service, 100) == MOL_SERVICE_ERR_IO);
     assert(service.state == MOL_ERROR && mock.clock_calls == 3);
     assert(mol_service_recover(&service) == MOL_SERVICE_OK);
 
+    assert(mol_service_begin(&service, 0U, 64U) == MOL_SERVICE_OK);
+    mol_service_complete(&service, 1, 33U);
+    assert(service.completed_count == 1U);
+    assert(service.current_task == MOL_SERVICE_TASK_NONE);
+    assert(((mock.lcd_status >> 5) & 7U) == 0U);
+    mol_service_benchmark_snapshot(&service, &benchmark);
+    assert(benchmark.cpu_latency_us[0] == 384U);
+    assert(benchmark.end_to_end_speedup_q8_8[0] == 2979U);
+    assert(benchmark.speedup_q8_8[0] == 120U * 256U);
+
     mock.now = 1000000;
     mol_service_poll(&service, mock.now);
+    assert(((mock.lcd_status >> 5) & 7U) == MOL_SERVICE_TASK_NONE);
     mol_service_snapshot(&service, &snapshot);
     assert(snapshot.temperature_q8_8 == (45U << 8));
     assert(snapshot.vccint_mv == 1000 && snapshot.vccaux_mv == 1800);
@@ -143,6 +173,7 @@ class MolServiceTests(unittest.TestCase):
             "mol_service_poll(&service",
             "mol_service_idle(&service)",
             "MOL_TCP_IDLE_POLL_LIMIT 5U",
+            "mol_dma_builder_add_weight_reload(",
         ):
             self.assertIn(marker, main)
         self.assertIn("mol_service.c mol_service.h", vitis)

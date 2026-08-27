@@ -184,6 +184,7 @@ module generator_accelerator_top #(
     reg [2:0] display_service_state;
     reg [1:0] display_clock_profile;
     reg [2:0] display_current_task;
+    reg display_activity_toggle;
     reg [15:0] display_temperature_q8_8;
     reg [15:0] display_vccint_mv;
     reg [15:0] display_vccaux_mv;
@@ -200,8 +201,9 @@ module generator_accelerator_top #(
     reg [15:0] display_speedup3_q8_8;
     reg [31:0] display_batch_completed;
     reg [31:0] display_batch_total;
-    wire [407:0] display_staging_bundle = {
+    wire [408:0] display_staging_bundle = {
         display_service_state, display_clock_profile, display_current_task,
+        display_activity_toggle,
         display_temperature_q8_8, display_vccint_mv, display_vccaux_mv,
         display_completed_count, display_failed_count, display_avg_latency_us,
         display_latest_latency0_us, display_latest_latency1_us,
@@ -210,7 +212,7 @@ module generator_accelerator_top #(
         display_speedup2_q8_8, display_speedup3_q8_8,
         display_batch_completed, display_batch_total
     };
-    reg [407:0] display_hold_bundle;
+    reg [408:0] display_hold_bundle;
     reg display_commit_toggle;
     reg display_commit_pending;
     (* ASYNC_REG = "TRUE" *) reg display_ack_meta;
@@ -218,12 +220,13 @@ module generator_accelerator_top #(
     (* ASYNC_REG = "TRUE" *) reg display_commit_meta;
     (* ASYNC_REG = "TRUE" *) reg display_commit_sync;
     reg display_ack_toggle;
-    reg [407:0] display_pixel_bundle;
+    reg [408:0] display_pixel_bundle;
     (* ASYNC_REG = "TRUE" *) reg [2:0] display_engine_busy_meta;
     (* ASYNC_REG = "TRUE" *) reg [2:0] display_pixel_engine_busy;
     wire [2:0] display_pixel_service_state;
     wire [1:0] display_pixel_clock_profile;
     wire [2:0] display_pixel_current_task;
+    wire display_pixel_activity_toggle;
     wire [15:0] display_pixel_temperature_q8_8;
     wire [15:0] display_pixel_vccint_mv;
     wire [15:0] display_pixel_vccaux_mv;
@@ -243,7 +246,8 @@ module generator_accelerator_top #(
 
     assign {
         display_pixel_service_state, display_pixel_clock_profile,
-        display_pixel_current_task, display_pixel_temperature_q8_8,
+        display_pixel_current_task, display_pixel_activity_toggle,
+        display_pixel_temperature_q8_8,
         display_pixel_vccint_mv, display_pixel_vccaux_mv,
         display_pixel_completed_count, display_pixel_failed_count,
         display_pixel_avg_latency_us, display_pixel_latest_latency0_us,
@@ -358,6 +362,7 @@ module generator_accelerator_top #(
             display_service_state <= 3'd1;
             display_clock_profile <= 2'd1;
             display_current_task <= 3'd7;
+            display_activity_toggle <= 1'b0;
             display_temperature_q8_8 <= 16'h2d00;
             display_vccint_mv <= 16'd1000;
             display_vccaux_mv <= 16'd1800;
@@ -373,8 +378,8 @@ module generator_accelerator_top #(
             display_speedup2_q8_8 <= 16'd10470;
             display_speedup3_q8_8 <= 16'd586;
             display_batch_completed <= 32'd0;
-            display_batch_total <= 32'd100000;
-            display_hold_bundle <= 408'd0;
+            display_batch_total <= 32'd0;
+            display_hold_bundle <= 409'd0;
             display_commit_toggle <= 1'b0;
             display_commit_pending <= 1'b0;
             display_ack_meta <= 1'b0;
@@ -448,6 +453,7 @@ module generator_accelerator_top #(
                     display_service_state <= held_wdata[2:0];
                     display_clock_profile <= held_wdata[4:3];
                     display_current_task <= held_wdata[7:5];
+                    display_activity_toggle <= held_wdata[8];
                 end else if (held_awaddr == ADDR_LCD_TEMP) begin
                     display_temperature_q8_8 <= held_wdata[15:0];
                 end else if (held_awaddr == ADDR_LCD_VOLTAGE) begin
@@ -483,7 +489,7 @@ module generator_accelerator_top #(
                         !display_commit_pending) begin
                         display_hold_bundle <= {
                             display_service_state, display_clock_profile,
-                            display_current_task,
+                            display_current_task, display_activity_toggle,
                             display_temperature_q8_8, display_vccint_mv,
                             display_vccaux_mv, display_completed_count,
                             display_failed_count, display_avg_latency_us,
@@ -576,7 +582,7 @@ module generator_accelerator_top #(
             display_commit_meta <= 1'b0;
             display_commit_sync <= 1'b0;
             display_ack_toggle <= 1'b0;
-            display_pixel_bundle <= 408'd0;
+            display_pixel_bundle <= 409'd0;
             display_engine_busy_meta <= 3'd0;
             display_pixel_engine_busy <= 3'd0;
         end else begin
@@ -1176,7 +1182,8 @@ module generator_accelerator_top #(
         end else if (s_axi_araddr == ADDR_DMA_TEST_BEATS) begin
             read_data_mux = dma_test_beats;
         end else if (s_axi_araddr == ADDR_LCD_STATUS) begin
-            read_data_mux = {24'd0, display_current_task,
+            read_data_mux = {23'd0, display_activity_toggle,
+                             display_current_task,
                              display_clock_profile, display_service_state};
         end else if (s_axi_araddr == ADDR_LCD_TEMP) begin
             read_data_mux = {16'd0, display_temperature_q8_8};
@@ -1282,6 +1289,7 @@ module generator_accelerator_top #(
         .service_state(display_pixel_service_state),
         .clock_profile(display_pixel_clock_profile),
         .current_task(display_pixel_current_task),
+        .activity_toggle(display_pixel_activity_toggle),
         .temperature_q8_8(display_pixel_temperature_q8_8),
         .vccint_mv(display_pixel_vccint_mv),
         .vccaux_mv(display_pixel_vccaux_mv),

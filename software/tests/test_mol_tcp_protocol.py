@@ -119,9 +119,9 @@ class MolTcpProtocolTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        if cls.lib is not None:
+        if cls.lib is not None and hasattr(ctypes, "windll"):
             ctypes.windll.kernel32.FreeLibrary(cls.lib._handle)
-            cls.lib = None
+        cls.lib = None
         cls.temp_dir.cleanup()
 
     @staticmethod

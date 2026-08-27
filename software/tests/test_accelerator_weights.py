@@ -59,7 +59,8 @@ class AcceleratorWeightTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        ctypes.windll.kernel32.FreeLibrary(cls.lib._handle)
+        if hasattr(ctypes, "windll"):
+            ctypes.windll.kernel32.FreeLibrary(cls.lib._handle)
         cls.lib = None
         cls.temp_dir.cleanup()
 
